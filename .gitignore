@@ -1,0 +1,4 @@
+tools/sign.exe
+link.exe
+link.exe.sig
+*.old*.exe
