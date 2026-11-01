@@ -1,4 +1,4 @@
-// 연동: 메인 PC 키보드·마우스로 서브 PC를 조작하고, 클립보드(글·그림)를 맞추고, 파일을 끌어 놓아 옮기는 프로그램.
+﻿// 연동: 메인 PC 키보드·마우스로 서브 PC를 조작하고, 클립보드(글·그림)를 맞추고, 파일을 끌어 놓아 옮기는 프로그램.
 // 처음 실행하면 설정 창에서 역할(메인/서브)을 고르고, 같은 네트워크의 상대 PC와 6자리 숫자로 짝을 맺는다.
 //   link.exe                 실행(이미 돌고 있으면 설정 창을 띄운다). 내려받은 exe를 실행하면 %LOCALAPPDATA%\Yeondong\으로 복사해 그쪽을 띄운다
 //   link.exe --install       (관리자) 관리자 기능 설치: Program Files로 복사, 입력 도우미 서비스, 방화벽 허용 (Service.cs)
@@ -17,7 +17,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("연동")]
 [assembly: System.Reflection.AssemblyProduct("Yeondong")]
-[assembly: System.Reflection.AssemblyVersion("0.6.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.6.1.0")]
 
 static class Program
 {

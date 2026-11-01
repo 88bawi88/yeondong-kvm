@@ -93,17 +93,16 @@ class SetupForm : Form
         BackColor = Bg;
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 9.5f);
-        AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(600, 400);
+        // 좌표는 96dpi 기준으로 적고 마지막에 화면 배율만큼 늘린다. 여러 줄 글은 실제 글꼴로 재서 높이를 정한다.
+        AutoScaleMode = AutoScaleMode.None;
+        using (var g = CreateGraphics()) k = g.DpiX / 96f;
         Icon = Tray.AppIcon;
 
         int y = 16;
         y = Section("안내", y);
-        var info = Lbl("연동은 이 PC의 키보드·마우스 입력, 클립보드(글·그림), 끌어 놓은 파일을 짝 맺은 PC로 보냅니다. " +
-                       "모두 암호화되어 같은 네트워크(사설 주소) 안에서만 오가고, 외부 서버로는 보내지 않습니다. " +
-                       "인터넷 연결은 새 판 확인(GitHub)에만 씁니다.", 20, y, 560, 58);
-        info.ForeColor = Dim;
-        y += 62;
+        y = Para("연동은 이 PC의 키보드·마우스 입력, 클립보드(글·그림), 끌어 놓은 파일을 짝 맺은 PC로 보냅니다. " +
+                 "모두 암호화되어 같은 네트워크(사설 주소) 안에서만 오가고, 외부 서버로는 보내지 않습니다. " +
+                 "인터넷 연결은 새 판 확인(GitHub)에만 씁니다.", y);
         consent = new CheckBox { Text = "위 내용을 확인했고 동의합니다", Left = 20, Top = y, Width = 400, Checked = cfg.Consent, ForeColor = Color.White };
         Controls.Add(consent);
         y += 40;
@@ -126,11 +125,9 @@ class SetupForm : Form
         if (conn != null)
         {
             y = Section("짝 맺기", y);
-            var hint = Lbl(cfg.Role == "main"
+            y = Para(cfg.Role == "main"
                 ? "서브 PC에서 연동 설정을 열고 이 PC를 고르면, 두 PC에 같은 숫자가 뜹니다. 이 창을 열어 둔 동안만 받습니다."
-                : "같은 네트워크에서 찾은 메인 PC입니다. 고르고 [짝 맺기]를 누르세요. 메인 PC에서도 연동 설정 창을 열어 두어야 합니다.", 20, y, 560, 40);
-            hint.ForeColor = Dim;
-            y += 44;
+                : "같은 네트워크에서 찾은 메인 PC입니다. 고르고 [짝 맺기]를 누르세요. 메인 PC에서도 연동 설정 창을 열어 두어야 합니다.", y);
             foundList = List(20, y, 400, 92);
             pairBtn = Btn("짝 맺기", 430, y, 150, true);
             pairBtn.Click += delegate { var f = foundList.SelectedItem as FoundItem; if (f != null) Pair(f.F.Ip, f.F.Port); };
@@ -149,9 +146,7 @@ class SetupForm : Form
             y += 82;
 
             y = Section("관리자 기능", y);
-            var adm = Lbl("방화벽 허용, 관리자 권한 창·UAC 창·잠금 화면 조작(서브 PC), 자동 업데이트를 Windows 서비스로 켭니다. 관리자 권한이 필요합니다.", 20, y, 560, 40);
-            adm.ForeColor = Dim;
-            y += 44;
+            y = Para("방화벽 허용, 관리자 권한 창·UAC 창·잠금 화면 조작(서브 PC), 자동 업데이트를 Windows 서비스로 켭니다. 관리자 권한이 필요합니다.", y);
             adminBtn = Btn("", 20, y, 200, false);
             adminBtn.Click += delegate { ToggleAdmin(); };
             adminStatus = Lbl("", 232, y + 6, 350, 22);
@@ -166,7 +161,25 @@ class SetupForm : Form
             refresh.Start();
             RefreshLists();
         }
-        ClientSize = new Size(600, y + 12);
+        foreach (Control ctl in Controls)
+        {
+            if (ctl.AutoSize) ctl.Location = new Point(S(ctl.Left), S(ctl.Top));
+            else ctl.Bounds = new Rectangle(S(ctl.Left), S(ctl.Top), S(ctl.Width), S(ctl.Height));
+        }
+        ClientSize = new Size(S(600), S(y + 12));
+    }
+
+    float k = 1;
+    int S(int v) { return (int)Math.Round(v * k); }
+
+    // 흐린 색 여러 줄 글. 실제 글꼴로 잰 높이(96dpi 기준)만큼 아래로 내려 다음 y를 돌려준다.
+    int Para(string text, int y)
+    {
+        var l = Lbl(text, 20, y, 560, 0);
+        l.ForeColor = Dim;
+        var size = TextRenderer.MeasureText(text, Font, new Size(S(560), 0), TextFormatFlags.WordBreak);
+        l.Height = (int)Math.Ceiling(size.Height / k) + 2;
+        return y + l.Height + 6;
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
