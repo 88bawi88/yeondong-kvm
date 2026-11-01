@@ -17,7 +17,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("연동")]
 [assembly: System.Reflection.AssemblyProduct("Yeondong")]
-[assembly: System.Reflection.AssemblyVersion("0.7.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.7.1.0")]
 
 static class Program
 {

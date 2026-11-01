@@ -532,13 +532,15 @@ static class AgentClient
         NamedPipeClientStream p = null;
         try
         {
-            p = new NamedPipeClientStream(".", SvcUtil.PipeName(Process.GetCurrentProcess().SessionId), PipeDirection.Out, PipeOptions.None);
+            p = new NamedPipeClientStream(".", SvcUtil.PipeName(Process.GetCurrentProcess().SessionId),
+                PipeAccessRights.WriteData | PipeAccessRights.ReadAttributes | PipeAccessRights.ReadPermissions,
+                PipeOptions.None, TokenImpersonationLevel.None, HandleInheritability.None);
             p.Connect(100);
-            // 파이프를 먼저 만들어 둔 가짜 서버에 입력을 보내지 않도록 서버도 같은 실행 파일인지 본다
-            uint spid;
-            if (!SvcNative.GetNamedPipeServerProcessId(p.SafePipeHandle.DangerousGetHandle(), out spid)) throw new IOException("서버 pid 확인 실패");
-            string img = SvcUtil.ImagePath(spid);
-            if (img == null || !SvcUtil.SamePath(img, SvcUtil.Exe())) throw new IOException("서버 실행 파일이 다름: " + img);
+            // 파이프를 먼저 만들어 둔 가짜 서버에 입력을 보내지 않도록, 파이프 주인이 SYSTEM인지 본다(관리자 권한 없이는 만들 수 없다).
+            // SYSTEM 프로세스의 실행 파일 경로는 보통 사용자 권한으로 읽을 수 없어서 주인으로 확인한다.
+            var owner = p.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            if (owner == null || !(owner.IsWellKnown(WellKnownSidType.LocalSystemSid) || owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)))
+                throw new IOException("파이프 주인이 SYSTEM이 아님: " + owner);
             pipe = p;
             return true;
         }
