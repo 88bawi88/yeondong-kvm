@@ -136,10 +136,15 @@ static class ScreenShare
 class ViewerForm : Form
 {
     readonly SubState sub;
-    Image frame;
-    Rectangle remote;        // 서브 가상 화면(그 PC 좌표)
+    // 받은 그림은 뒤 스레드에서 풀고 창 크기로 줄여 둔다. 화면 스레드는 그대로 찍기만 한다(키 입력·넘어가기 판정이 밀리지 않게).
+    Bitmap frame;            // 창에 맞춘 그림
+    Rectangle shown;         // frame을 그리는 자리(창 좌표)
     string note = "화면을 받는 중...";
     bool inputOn;            // 서브가 이 창 입력을 받는 중(Leave를 보내야 한다)
+    readonly object pgate = new object();
+    byte[] pending;          // 아직 풀지 않은 가장 새 그림
+    volatile bool closing;
+    Size client;             // 뒤 스레드가 쓸 창 안 크기
 
     public ViewerForm(SubState s)
     {
@@ -153,47 +158,80 @@ class ViewerForm : Form
         ImeMode = ImeMode.Disable;   // 한글 입력기가 키를 가로채지 않게(조합은 서브 PC 입력기가 한다)
         var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(wa.Width * 2 / 3, wa.Height * 2 / 3);
-        Location = new Point(wa.Left + wa.Width / 6, wa.Top + wa.Height / 6);
+        // 서브 화면 비율(모르면 16:9)로, 모니터의 절반 너비·2/3 높이 안에 들어가게
+        var sc = s.M.Screen != null && s.M.Screen.Length == 2 ? new Size(s.M.Screen[0], s.M.Screen[1]) : new Size(1920, 1080);
+        float k = Math.Min(wa.Width / 2f / sc.Width, wa.Height * 2 / 3f / sc.Height);
+        ClientSize = new Size(Math.Max(320, (int)(sc.Width * k)), Math.Max(180, (int)(sc.Height * k)));
+        Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Top + (wa.Height - Height) / 2);
+        client = ClientSize;
+        new Thread(Work) { IsBackground = true, Name = "view-decode" }.Start();
     }
 
     protected override void OnShown(EventArgs e) { base.OnShown(e); Restart(); }
 
-    // 연결이 새로 생기면 다시 보내 달라고 한다
+    // 연결이 새로 생기거나 창 크기가 바뀌면 그 너비로 다시 보내 달라고 한다
     public void Restart()
     {
         var l = sub.Link;
         if (l == null || l.Closed) { note = "연결 끊김"; Invalidate(); return; }
-        int w = Screen.FromControl(this).Bounds.Width;
-        l.Send(Msg.ViewStart, FileXfer.Ints(w));
+        l.Send(Msg.ViewStart, FileXfer.Ints(Math.Max(320, ClientSize.Width)));
     }
 
     public void Closed2() { note = "연결 끊김"; inputOn = false; Invalidate(); }
 
-    // 연결의 읽기 스레드에서 부른다
+    // 연결의 읽기 스레드에서 부른다. 풀지 못한 그림이 있으면 버리고 새 것으로 바꾼다.
     public void OnFrame(byte[] b)
     {
-        Image img;
-        Rectangle r;
-        try
+        bool dropped;
+        lock (pgate) { dropped = pending != null; pending = b; Monitor.Pulse(pgate); }
+        if (dropped) Ack();   // 버린 그림도 받았다고 알린다(서브는 답을 2장까지만 기다린다)
+    }
+
+    void Work()
+    {
+        while (true)
         {
-            r = new Rectangle(BitConverter.ToInt32(b, 0), BitConverter.ToInt32(b, 4), BitConverter.ToInt32(b, 8), BitConverter.ToInt32(b, 12));
-            img = Image.FromStream(new MemoryStream(b, 16, b.Length - 16));
-        }
-        catch (Exception e) { Log.Write("화면 그림 풀기 실패: " + e.Message); Ack(); return; }
-        try
-        {
-            BeginInvoke((Action)(() =>
+            byte[] b;
+            lock (pgate)
             {
-                var old = frame;
-                frame = img; remote = r; note = null;
-                if (old != null) old.Dispose();
-                Invalidate();
-                Update();
+                while (pending == null && !closing) Monitor.Wait(pgate);
+                if (closing) return;
+                b = pending; pending = null;
+            }
+            try
+            {
+                Bitmap bmp; Rectangle at;
+                using (var img = Image.FromStream(new MemoryStream(b, 16, b.Length - 16)))
+                {
+                    var c = client;
+                    float k = Math.Min(c.Width / (float)img.Width, c.Height / (float)img.Height);
+                    int w = Math.Max(1, (int)(img.Width * k)), h = Math.Max(1, (int)(img.Height * k));
+                    at = new Rectangle((c.Width - w) / 2, (c.Height - h) / 2, w, h);
+                    bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        g.InterpolationMode = InterpolationMode.Bilinear;
+                        g.PixelOffsetMode = PixelOffsetMode.Half;
+                        g.DrawImage(img, new Rectangle(0, 0, w, h));
+                    }
+                }
+                BeginInvoke((Action)(() =>
+                {
+                    var old = frame;
+                    bool moved = at != shown;
+                    frame = bmp; shown = at;
+                    if (old != null) old.Dispose();
+                    if (note != null || moved) { note = null; Invalidate(); } else Invalidate(at);
+                    Ack();
+                }));
+            }
+            catch (Exception e)
+            {
+                if (closing) return;
+                Log.Write("화면 그림 풀기 실패: " + e.Message);
                 Ack();
-            }));
+            }
         }
-        catch { img.Dispose(); }
     }
 
     public void OnStop(byte reason)
@@ -203,29 +241,28 @@ class ViewerForm : Form
 
     void Ack() { var l = sub.Link; if (l != null && !l.Closed) l.Send(Msg.ViewAck, null); }
 
-    Rectangle ImageRect()
-    {
-        if (frame == null) return Rectangle.Empty;
-        var c = ClientRectangle;
-        float k = Math.Min(c.Width / (float)frame.Width, c.Height / (float)frame.Height);
-        int w = (int)(frame.Width * k), h = (int)(frame.Height * k);
-        return new Rectangle(c.Left + (c.Width - w) / 2, c.Top + (c.Height - h) / 2, w, h);
-    }
+    Rectangle ImageRect() { return frame == null ? Rectangle.Empty : shown; }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        if (frame != null)
-        {
-            e.Graphics.InterpolationMode = InterpolationMode.Bilinear;
-            e.Graphics.DrawImage(frame, ImageRect());
-        }
+        if (frame != null) e.Graphics.DrawImageUnscaled(frame, shown.Location);
         if (note != null)
             TextRenderer.DrawText(e.Graphics, note, Font, ClientRectangle, Color.FromArgb(0xa0, 0xa0, 0xa0),
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
-    protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        client = ClientSize;
+        Invalidate();
+        if (WindowState != FormWindowState.Minimized && IsHandleCreated && !resizing) Restart();   // 최대화·복원
+    }
+
+    bool resizing;
+    protected override void OnResizeBegin(EventArgs e) { base.OnResizeBegin(e); resizing = true; }
+    protected override void OnResizeEnd(EventArgs e) { base.OnResizeEnd(e); resizing = false; Restart(); }
 
     // ---- 입력 ----
     void Send(byte type, byte[] body)
@@ -348,6 +385,7 @@ class ViewerForm : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        lock (pgate) { closing = true; Monitor.Pulse(pgate); }
         StopInput();
         var l = sub.Link;
         if (l != null && !l.Closed) l.Send(Msg.ViewStop, null);
