@@ -31,8 +31,8 @@ static class Msg
     public const byte ViewFrame = 62; // 서브→메인: [가상 화면 x,y,w,h int32×4][JPEG]
     public const byte ViewAck = 63;   // 메인→서브: 그림 하나를 그렸다
     public const byte ViewPoint = 64; // 메인→서브: [x float][y float] 서브 가상 화면 안 비율 위치로 커서를 옮기고 입력을 받는다. 음수면 옮기지 않는다
-    public const byte ShareReq = 70;  // 양쪽: json {tag, op, ..} 공유 폴더 요청 (Share.cs)
-    public const byte ShareResp = 71; // 양쪽: json {tag, ..} 그 답
+    public const byte SyncList = 70;  // 양쪽: json {files, dirs} 공유 폴더에 있는 것 (Share.cs)
+    public const byte SyncOp = 71;    // 양쪽: json {op, rel, ..} 공유 폴더에서 바뀐 것
 
     // 변 번호. 서브 화면 기준이다.
     public const byte Left = 0, Top = 1, Right = 2, Bottom = 3;

@@ -48,14 +48,20 @@ static class Tray
             };
             m.Items.Add(viewItem);
         }
-        var share = new ToolStripMenuItem(c.SharePath == "" ? "공유 폴더: 없음" : "공유 폴더: " + c.SharePath);
-        share.DropDownItems.Add("폴더 정하기...", null, delegate
+        Action choose = delegate
         {
-            using (var d = new FolderBrowserDialog { Description = "짝 맺은 PC가 둘러보고 파일을 주고받을 폴더", SelectedPath = c.SharePath })
-                if (d.ShowDialog() == DialogResult.OK) { c.SharePath = d.SelectedPath; try { c.Save(); } catch { } Log.Write("공유 폴더: " + c.SharePath); }
+            using (var d = new FolderBrowserDialog { Description = "짝 맺은 PC와 내용을 똑같이 맞출 폴더(상대 PC도 공유 폴더를 정해야 맞춰집니다)", SelectedPath = c.SharePath })
+                if (d.ShowDialog() == DialogResult.OK) { c.SharePath = d.SelectedPath; try { c.Save(); } catch { } Log.Write("공유 폴더: " + c.SharePath); Share.Restart(); }
+        };
+        m.Items.Add("공유 폴더 열기", null, delegate
+        {
+            if (c.SharePath == "" || !Directory.Exists(c.SharePath)) choose();
+            if (c.SharePath != "" && Directory.Exists(c.SharePath)) Process.Start(new ProcessStartInfo("explorer.exe", "\"" + c.SharePath + "\"") { UseShellExecute = true });
         });
+        var share = new ToolStripMenuItem(c.SharePath == "" ? "공유 폴더 동기화: 꺼짐" : "공유 폴더 동기화: " + c.SharePath);
+        share.DropDownItems.Add("폴더 정하기...", null, delegate { choose(); });
         if (c.SharePath != "")
-            share.DropDownItems.Add("공유 끄기", null, delegate { c.SharePath = ""; try { c.Save(); } catch { } Log.Write("공유 폴더 끔"); });
+            share.DropDownItems.Add("동기화 끄기", null, delegate { c.SharePath = ""; try { c.Save(); } catch { } Log.Write("공유 폴더 끔"); Share.Restart(); });
         m.Items.Add(share);
         m.Items.Add("로그 폴더 열기", null, delegate { Process.Start(new ProcessStartInfo(Program.Home) { UseShellExecute = true }); });
         m.Items.Add(new ToolStripMenuItem("연동 " + Program.Version) { Enabled = false });

@@ -53,11 +53,6 @@ static class Sub
             menu.Items.Add(new ToolStripMenuItem(mp == null ? "짝 맺은 메인 PC 없음" : "메인 PC " + mp.Name + ": " + (cur != null && !cur.Closed ? "연결됨" : "끊김")) { Enabled = false });
             menu.Items.Add(new ToolStripMenuItem("관리자 창·잠금 화면 조작: " + (AgentClient.Available ? "켜짐" : "꺼짐")) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
-            if (cur != null && !cur.Closed)
-            {
-                var name = mp != null ? mp.Name : "메인 PC";
-                menu.Items.Add(name + " 공유 폴더 열기", null, delegate { new ShareForm(name, () => cur).Show(); });
-            }
             Tray.Common(menu, cfg, conn, Quit);
         };
         tray.ContextMenuStrip = menu;
@@ -76,6 +71,7 @@ static class Sub
         {
             if (m.Role != "main") { l.Close("메인 PC가 아님"); return; }
             l.OnMessage = OnMessage;
+            Share.Attach(l, m.Host);
             var old = cur;
             cur = l;
             if (old != null && old != l) lock (gate) { active = false; ReleaseAll(); }
@@ -85,6 +81,7 @@ static class Sub
         {
             FileXfer.Closed(l);
             ScreenShare.Stop(l);
+            Share.Detach(l);
             if (cur != l) return;
             lock (gate) { cur = null; active = false; ReleaseAll(); }
             PostOverlay();

@@ -1,330 +1,397 @@
-// 공유 폴더. 각 PC가 폴더 하나를 공유로 정해 두면(트레이 메뉴), 짝 맺은 상대 PC가 그 안을 창에서 둘러보고 파일을 받거나 올린다.
-// 요청과 답은 ShareReq·ShareResp(json, tag로 짝을 맞춘다). 파일 내용은 끌어 놓기와 같은 FileReq 흐름으로 옮긴다(FileXfer.cs).
-//   list {path}              → {items: [{name, size}]}   size -1은 폴더
-//   get  {path, names}       → {id, entries}             보는 쪽이 FileReq로 항목마다 받는다
-//   put  {path, id, entries} → {count}                   공유한 쪽이 보는 쪽에 FileReq로 받아 그 폴더에 쓴다
-// 실패하면 {error: 글}. 공유 폴더 바깥(..\ 등)은 열지 않는다.
+// 공유 폴더 동기화. 두 PC가 각자 공유 폴더를 정해 두면(트레이 메뉴), 연결된 동안 두 폴더를 같게 맞춘다.
+//   연결되면 양쪽이 SyncList {files: [{rel, size, mtime}], dirs: [rel]}를 보낸다. 받은 쪽은 상대에게 없거나 자기 것이 더 새 파일을 보낸다.
+//   폴더가 바뀌면(FileSystemWatcher) 그때그때 SyncOp를 보낸다: put {rel, size, mtime, id} / del {rel} / mkdir {rel} / move {rel, to}
+//   put을 받은 쪽은 FileReq(FileXfer.cs)로 내용을 받아 임시 이름(.~yd…)으로 쓴 뒤 제자리로 옮긴다. 지울 때는 휴지통으로 보낸다.
+//   떨어져 있는 동안 지운 것: 마지막으로 맞춘 목록(sync-<상대 id>.json)에 있었고 내 것은 그때 그대로인데 상대에게 없으면, 상대가 지운 것으로 보고 지운다.
+//   메인 PC는 서브에서 받은 변경을 다른 서브에도 넘긴다.
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Web.Script.Serialization;
-using System.Windows.Forms;
+using Microsoft.VisualBasic.FileIO;
 
 static class Share
 {
-    static readonly object gate = new object();
-    static int nextId = 1 << 30;   // 끌어 놓기 목록 번호와 겹치지 않게
-    static readonly Dictionary<int, List<FileEntry>> offers = new Dictionary<int, List<FileEntry>>();
-    static readonly Queue<int> order = new Queue<int>();
-    static int nextTag;
-    static readonly Dictionary<int, TaskCompletionSource<Dictionary<string, object>>> pending = new Dictionary<int, TaskCompletionSource<Dictionary<string, object>>>();
-    static readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     public static Config Cfg;
+    static readonly object gate = new object();
+    static readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+    const long Slack = 2 * TimeSpan.TicksPerSecond;   // 시각이 이만큼 안이면 같은 것으로 본다
 
-    // FileReq를 받았을 때 끌어 놓기 목록에 없으면 여기서 찾는다
+    // ---- 상대가 받아 갈 파일(FileReq 목록 id) ----
+    static int nextId = 1 << 30;   // 끌어 놓기 목록 번호와 겹치지 않게
+    static readonly Dictionary<int, FileEntry> offers = new Dictionary<int, FileEntry>();
+    static readonly Queue<int> order = new Queue<int>();
+
     public static FileEntry Entry(int id, int idx)
     {
-        lock (gate)
-        {
-            List<FileEntry> l;
-            return offers.TryGetValue(id, out l) && idx >= 0 && idx < l.Count ? l[idx] : null;
-        }
+        lock (gate) { FileEntry e; return idx == 0 && offers.TryGetValue(id, out e) ? e : null; }
     }
 
-    public static int Register(List<FileEntry> list)
+    static int Register(FileEntry e)
     {
         lock (gate)
         {
             int id = ++nextId;
-            offers[id] = list;
+            offers[id] = e;
             order.Enqueue(id);
-            while (order.Count > 32) offers.Remove(order.Dequeue());
+            while (order.Count > 20000) offers.Remove(order.Dequeue());
             return id;
         }
     }
 
-    static byte[] Json(Dictionary<string, object> d) { return Encoding.UTF8.GetBytes(json.Serialize(d)); }
-
-    // ---- 보는 쪽 ----
-    public static Dictionary<string, object> Ask(Link l, Dictionary<string, object> req, int timeoutMs = 15000)
+    // ---- 연결된 상대 ----
+    class Peer
     {
-        if (l == null || l.Closed) throw new IOException("상대 PC와 연결돼 있지 않음");
-        var t = new TaskCompletionSource<Dictionary<string, object>>();
-        int tag;
-        lock (gate) { tag = ++nextTag; pending[tag] = t; }
-        req["tag"] = tag;
-        l.Send(Msg.ShareReq, Json(req));
-        try
+        public Link L;
+        public string Id;
+        public readonly BlockingCollection<Action> Work = new BlockingCollection<Action>();   // 받은 일을 차례로(받기는 오래 걸린다)
+        public Dictionary<string, long> Known;   // 마지막으로 양쪽에 같이 있던 파일 → 수정 시각
+    }
+    static readonly List<Peer> peers = new List<Peer>();
+
+    static string Root
+    {
+        get { var r = Cfg == null ? "" : Cfg.SharePath; return r != "" && Directory.Exists(r) ? Path.GetFullPath(r).TrimEnd('\\') : null; }
+    }
+
+    public static void Attach(Link l, string peerId)
+    {
+        var p = new Peer { L = l, Id = peerId };
+        p.Known = LoadKnown(peerId);
+        lock (gate) { peers.RemoveAll(x => x.L == l); peers.Add(p); }
+        new Thread(() => { foreach (var a in p.Work.GetConsumingEnumerable()) { try { a(); } catch (Exception e) { Log.Write("동기화 오류: " + e.Message); } } })
+            { IsBackground = true, Name = "sync-in" }.Start();
+        Watch();
+        SendList(p);
+    }
+
+    public static void Detach(Link l)
+    {
+        lock (gate)
         {
-            if (!t.Task.Wait(timeoutMs)) throw new IOException("상대 PC가 답하지 않음");
-            var r = t.Task.Result;
-            if (r.ContainsKey("error")) throw new IOException(Convert.ToString(r["error"]));
-            return r;
+            foreach (var p in peers.Where(x => x.L == l)) p.Work.CompleteAdding();
+            peers.RemoveAll(x => x.L == l);
         }
-        finally { lock (gate) pending.Remove(tag); }
+    }
+
+    // 공유 폴더를 바꾸거나 껐을 때
+    public static void Restart()
+    {
+        Watch();
+        List<Peer> ps; lock (gate) ps = peers.ToList();
+        foreach (var p in ps) SendList(p);
+    }
+
+    static void SendList(Peer p)
+    {
+        var root = Root;
+        if (root == null || p.L.Closed) return;
+        var files = new List<object>(); var dirs = new List<object>();
+        foreach (var kv in Scan(root, dirs)) files.Add(new Dictionary<string, object> { { "rel", kv.Key }, { "size", kv.Value.Length }, { "mtime", kv.Value.LastWriteTimeUtc.Ticks } });
+        p.L.Send(Msg.SyncList, Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string, object> { { "files", files }, { "dirs", dirs } })));
+        Log.Write("동기화 목록 보냄(" + p.L.Name + "): 파일 " + files.Count + "개");
+    }
+
+    static Dictionary<string, FileInfo> Scan(string root, List<object> dirs)
+    {
+        var r = new Dictionary<string, FileInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in new DirectoryInfo(root).EnumerateDirectories("*", System.IO.SearchOption.AllDirectories))
+            if (!Skip(d.Name) && dirs != null) dirs.Add(d.FullName.Substring(root.Length + 1));
+        foreach (var f in new DirectoryInfo(root).EnumerateFiles("*", System.IO.SearchOption.AllDirectories))
+            if (!Skip(f.Name)) r[f.FullName.Substring(root.Length + 1)] = f;
+        return r;
+    }
+
+    static bool Skip(string name)
+    {
+        // 연동 임시 파일, 바꿔치기할 때 Windows가 잠깐 만드는 이름(~RF….TMP), 오피스 잠금 파일(~$…)은 맞추지 않는다
+        return name.StartsWith(".~yd") || name.StartsWith("~$") || (name.Contains("~RF") && name.EndsWith(".TMP", StringComparison.OrdinalIgnoreCase))
+            || name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) || name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase);
     }
 
     // 연결의 읽기 스레드에서 부른다. 처리했으면 true.
     public static bool Handle(Link l, byte type, byte[] body)
     {
-        if (type == Msg.ShareResp)
-        {
-            var d = (Dictionary<string, object>)json.DeserializeObject(Encoding.UTF8.GetString(body));
-            TaskCompletionSource<Dictionary<string, object>> t;
-            lock (gate) pending.TryGetValue(Convert.ToInt32(d["tag"]), out t);
-            if (t != null) t.TrySetResult(d);
-            return true;
-        }
-        if (type != Msg.ShareReq) return false;
-        new Thread(() => Serve(l, body)) { IsBackground = true, Name = "share" }.Start();
+        if (type != Msg.SyncList && type != Msg.SyncOp) return false;
+        Peer p; lock (gate) p = peers.FirstOrDefault(x => x.L == l);
+        if (p == null || Root == null) return true;
+        var d = (Dictionary<string, object>)json.DeserializeObject(Encoding.UTF8.GetString(body));
+        try { p.Work.Add(() => { if (type == Msg.SyncList) Reconcile(p, d); else Apply(p, d); }); } catch (InvalidOperationException) { }
         return true;
     }
 
-    // ---- 공유한 쪽 ----
-    static void Serve(Link l, byte[] body)
+    // ---- 처음 맞추기 ----
+    static void Reconcile(Peer p, Dictionary<string, object> d)
     {
-        object tag = 0;
-        var r = new Dictionary<string, object>();
-        try
+        var root = Root; if (root == null) return;
+        var remote = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (Dictionary<string, object> f in (IEnumerable)d["files"]) remote[Convert.ToString(f["rel"])] = Convert.ToInt64(f["mtime"]);
+        foreach (var rel in ((IEnumerable)d["dirs"]).Cast<object>().Select(Convert.ToString))
         {
-            var d = (Dictionary<string, object>)json.DeserializeObject(Encoding.UTF8.GetString(body));
-            tag = d["tag"];
-            string root = Cfg.SharePath;
-            if (root == "" || !Directory.Exists(root)) throw new IOException("이 PC는 공유 폴더를 정해 두지 않았습니다");
-            string dir = Resolve(root, d.ContainsKey("path") ? Convert.ToString(d["path"]) : "");
-            if (!Directory.Exists(dir)) throw new IOException("없는 폴더입니다");
-            switch (Convert.ToString(d["op"]))
-            {
-                case "list":
-                    r["items"] = new DirectoryInfo(dir).GetFileSystemInfos()
-                        .Where(f => (f.Attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0)
-                        .OrderBy(f => f is FileInfo).ThenBy(f => f.Name, StringComparer.CurrentCultureIgnoreCase)
-                        .Select(f => new Dictionary<string, object> { { "name", f.Name }, { "size", f is FileInfo ? ((FileInfo)f).Length : -1L } })
-                        .ToArray();
-                    break;
-                case "get":
-                    var paths = ((IEnumerable)d["names"]).Cast<object>().Select(n => Resolve(dir, Convert.ToString(n))).ToArray();
-                    var list = FileXfer.List(paths);
-                    int id = Register(list);
-                    r = (Dictionary<string, object>)json.DeserializeObject(Encoding.UTF8.GetString(FileXfer.OfferJson(id, list)));
-                    Log.Write("공유 폴더에서 " + list.Count(e => e.Size >= 0) + "개 보냄: " + dir);
-                    break;
-                case "put":
-                    int pid;
-                    var entries = FileXfer.ParseOffer(Encoding.UTF8.GetBytes(json.Serialize(d)), out pid);
-                    r["count"] = Receive(l, pid, entries, dir, null);
-                    Log.Write("공유 폴더로 " + r["count"] + "개 받음: " + dir);
-                    break;
-                default: throw new IOException("모르는 요청");
-            }
+            var path = Resolve(root, rel);
+            if (path != null && !Directory.Exists(path) && !File.Exists(path)) { Quiet(rel); Directory.CreateDirectory(path); }
         }
-        catch (Exception e) { r = new Dictionary<string, object> { { "error", e.Message } }; }
-        r["tag"] = tag;
-        l.Send(Msg.ShareResp, Json(r));
+        int sent = 0, gone = 0;
+        foreach (var kv in Scan(root, null))
+        {
+            long mine = kv.Value.LastWriteTimeUtc.Ticks, theirs, known;
+            if (remote.TryGetValue(kv.Key, out theirs))
+            {
+                if (mine > theirs + Slack) { Put(p, kv.Key); sent++; }
+                else if (Math.Abs(mine - theirs) <= Slack) p.Known[kv.Key] = mine;
+            }
+            else if (p.Known.TryGetValue(kv.Key, out known) && Math.Abs(known - mine) <= Slack) { Delete(kv.Key); p.Known.Remove(kv.Key); gone++; }
+            else { Put(p, kv.Key); sent++; }
+        }
+        SaveKnown(p);
+        Log.Write("동기화 맞춤(" + p.L.Name + "): 보냄 " + sent + ", 상대에서 지워져 지움 " + gone);
     }
 
-    // 공유 폴더 안의 경로만 돌려준다
+    // ---- 바뀐 것 받기 ----
+    static void Apply(Peer p, Dictionary<string, object> d)
+    {
+        var root = Root; if (root == null) return;
+        string op = Convert.ToString(d["op"]), rel = Convert.ToString(d["rel"]);
+        var path = Resolve(root, rel);
+        if (path == null) return;
+        switch (op)
+        {
+            case "put":
+                long mtime = Convert.ToInt64(d["mtime"]), size = Convert.ToInt64(d["size"]);
+                var fi = new FileInfo(path);
+                if (fi.Exists && fi.Length == size && Math.Abs(fi.LastWriteTimeUtc.Ticks - mtime) <= Slack) { p.Known[rel] = mtime; break; }
+                if (fi.Exists && fi.LastWriteTimeUtc.Ticks > mtime + Slack) break;   // 내 것이 더 새것(곧 상대에게 간다)
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                var tmp = Path.Combine(Path.GetDirectoryName(path), ".~yd" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".part");
+                Quiet(rel);
+                try
+                {
+                    using (var src = FileXfer.Open(p.L, Convert.ToInt32(d["id"]), 0))
+                    using (var dst = new FileStream(tmp, FileMode.CreateNew))
+                        src.CopyTo(dst, 1 << 16);
+                    File.SetLastWriteTimeUtc(tmp, new DateTime(mtime, DateTimeKind.Utc));
+                    if (File.Exists(path)) File.Delete(path);
+                    File.Move(tmp, path);
+                }
+                finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } Quiet(rel); }
+                p.Known[rel] = mtime;
+                Log.Write("동기화 받음: " + rel + " (" + FileXfer.Mb(size) + ")");
+                Relay(p, delegate(Peer o) { Put(o, rel); });
+                break;
+            case "del":
+                if (!File.Exists(path) && !Directory.Exists(path)) break;
+                Delete(rel);
+                ForgetUnder(p, rel);
+                Log.Write("동기화 지움: " + rel);
+                Relay(p, delegate(Peer o) { Send(o, "del", rel); });
+                break;
+            case "mkdir":
+                if (!Directory.Exists(path)) { Quiet(rel); Directory.CreateDirectory(path); }
+                Relay(p, delegate(Peer o) { Send(o, "mkdir", rel); });
+                break;
+            case "move":
+                string to = Convert.ToString(d["to"]);
+                var dst2 = Resolve(root, to);
+                if (dst2 == null || File.Exists(dst2) || Directory.Exists(dst2)) break;
+                Quiet(rel); Quiet(to);
+                Directory.CreateDirectory(Path.GetDirectoryName(dst2));
+                if (File.Exists(path)) File.Move(path, dst2);
+                else if (Directory.Exists(path)) Directory.Move(path, dst2);
+                else break;
+                Rekey(p, rel, to);
+                Log.Write("동기화 옮김: " + rel + " → " + to);
+                Relay(p, delegate(Peer o) { Send(o, "move", rel, to); });
+                break;
+        }
+        SaveKnown(p);
+    }
+
+    // 메인 PC가 서브에서 받은 변경을 다른 서브에 넘긴다(서브는 메인 하나뿐이라 넘길 곳이 없다)
+    static void Relay(Peer from, Action<Peer> a)
+    {
+        List<Peer> ps; lock (gate) ps = peers.Where(x => x != from && !x.L.Closed).ToList();
+        foreach (var o in ps) a(o);
+    }
+
+    static void Put(Peer p, string rel)
+    {
+        var root = Root; if (root == null) return;
+        var fi = new FileInfo(Path.Combine(root, rel));
+        if (!fi.Exists) return;
+        int id = Register(new FileEntry { Rel = rel, Full = fi.FullName, Size = fi.Length });
+        p.Known[rel] = fi.LastWriteTimeUtc.Ticks;
+        p.L.Send(Msg.SyncOp, Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string, object> {
+            { "op", "put" }, { "rel", rel }, { "size", fi.Length }, { "mtime", fi.LastWriteTimeUtc.Ticks }, { "id", id } })));
+    }
+
+    static void Send(Peer p, string op, string rel, string to = null)
+    {
+        var d = new Dictionary<string, object> { { "op", op }, { "rel", rel } };
+        if (to != null) d["to"] = to;
+        if (op == "del") ForgetUnder(p, rel);
+        if (op == "move") Rekey(p, rel, to);
+        p.L.Send(Msg.SyncOp, Encoding.UTF8.GetBytes(json.Serialize(d)));
+    }
+
+    static void Delete(string rel)
+    {
+        var path = Path.Combine(Root, rel);
+        Quiet(rel);
+        if (File.Exists(path)) FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin, UICancelOption.DoNothing);
+        else if (Directory.Exists(path)) FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin, UICancelOption.DoNothing);
+        Quiet(rel);
+    }
+
+    static void ForgetUnder(Peer p, string rel)
+    {
+        foreach (var k in p.Known.Keys.Where(k => k.Equals(rel, StringComparison.OrdinalIgnoreCase) || k.StartsWith(rel + "\\", StringComparison.OrdinalIgnoreCase)).ToList())
+            p.Known.Remove(k);
+    }
+
+    static void Rekey(Peer p, string from, string to)
+    {
+        foreach (var k in p.Known.Keys.Where(k => k.Equals(from, StringComparison.OrdinalIgnoreCase) || k.StartsWith(from + "\\", StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            long v = p.Known[k];
+            p.Known.Remove(k);
+            p.Known[to + k.Substring(from.Length)] = v;
+        }
+    }
+
+    // 공유 폴더 안의 경로만 돌려준다(..\ 등은 null)
     static string Resolve(string root, string rel)
     {
         rel = (rel ?? "").Replace('/', '\\').Trim('\\');
-        if (Path.IsPathRooted(rel) || rel.Split('\\').Any(x => x == "..")) throw new IOException("잘못된 경로");
-        var full = Path.GetFullPath(rel == "" ? root : Path.Combine(root, rel));
-        var r = Path.GetFullPath(root).TrimEnd('\\');
-        if (!full.Equals(r, StringComparison.OrdinalIgnoreCase) && !full.StartsWith(r + "\\", StringComparison.OrdinalIgnoreCase))
-            throw new IOException("공유 폴더 바깥입니다");
-        return full;
+        if (rel == "" || Path.IsPathRooted(rel) || rel.Split('\\').Any(x => x == ".." || x == "." || x == "")) return null;
+        var full = Path.GetFullPath(Path.Combine(root, rel));
+        return full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase) ? full : null;
     }
 
-    // 상대 PC 목록(id)의 항목을 dest 폴더에 받는다. 같은 이름이 있으면 "이름 (2)"로 둔다. 받은 파일 수를 돌려준다.
-    public static int Receive(Link l, int id, List<FileEntry> entries, string dest, Action<string> progress)
+    // ---- 마지막으로 맞춘 목록 ----
+    static string KnownPath(string peerId) { return Path.Combine(Config.Dir, "sync-" + peerId + ".json"); }
+
+    static Dictionary<string, long> LoadKnown(string peerId)
     {
-        var renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // 맨 위 이름 → 실제로 쓴 이름
-        int count = 0;
-        for (int i = 0; i < entries.Count; i++)
+        var r = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        try
         {
-            var e = entries[i];
-            var parts = e.Rel.Split('\\');
-            string top;
-            if (!renamed.TryGetValue(parts[0], out top)) renamed[parts[0]] = top = Free(dest, parts[0], e.Size < 0);
-            parts[0] = top;
-            var path = Path.Combine(dest, string.Join("\\", parts));
-            if (e.Size < 0) { Directory.CreateDirectory(path); continue; }
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            if (progress != null) progress(e.Rel + " (" + FileXfer.Mb(e.Size) + ")");
-            using (var src = FileXfer.Open(l, id, i))
-            using (var dst = new FileStream(path, FileMode.CreateNew))
-                src.CopyTo(dst, 1 << 16);
-            count++;
+            if (File.Exists(KnownPath(peerId)))
+                foreach (var kv in (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(KnownPath(peerId))))
+                    r[kv.Key] = Convert.ToInt64(kv.Value);
         }
-        return count;
+        catch (Exception e) { Log.Write("동기화 목록 읽기 실패: " + e.Message); }
+        return r;
     }
 
-    static string Free(string dir, string name, bool folder)
+    static void SaveKnown(Peer p)
     {
-        string stem = folder ? name : Path.GetFileNameWithoutExtension(name), ext = folder ? "" : Path.GetExtension(name);
-        var p = name;
-        for (int n = 2; File.Exists(Path.Combine(dir, p)) || Directory.Exists(Path.Combine(dir, p)); n++) p = stem + " (" + n + ")" + ext;
-        return p;
+        try { lock (p.Known) File.WriteAllText(KnownPath(p.Id), json.Serialize(p.Known.ToDictionary(x => x.Key, x => (object)x.Value))); }
+        catch (Exception e) { Log.Write("동기화 목록 저장 실패: " + e.Message); }
     }
-}
 
-// 상대 PC 공유 폴더를 둘러보는 창. 더블클릭으로 폴더에 들어가고, [받기]로 내려받고, 파일을 끌어다 놓으면 올린다.
-class ShareForm : Form
-{
-    static readonly Color Bg = ColorTranslator.FromHtml("#202020"), Panel2 = ColorTranslator.FromHtml("#2b2b2b"),
-                          Dim = ColorTranslator.FromHtml("#a0a0a0"), Accent = ColorTranslator.FromHtml("#0078d4");
-    readonly Func<Link> link;
-    readonly string peer;
-    string path = "";
-    readonly ListView list;
-    readonly Label where, status;
-    readonly Button up, get, refresh;
-    volatile bool busy;
+    // ---- 이 PC 폴더 지켜보기 ----
+    static FileSystemWatcher watcher;
+    static string watching;
+    static readonly Dictionary<string, DateTime> quiet = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);   // 받아서 바꾸는 중인 것(되돌려 보내지 않게)
+    static readonly Dictionary<string, DateTime> dirty = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);   // 바뀐 것 → 마지막으로 바뀐 때
+    static Thread flusher;
 
-    public ShareForm(string peerName, Func<Link> linkOf)
+    static void Quiet(string rel) { lock (quiet) quiet[rel] = DateTime.UtcNow.AddSeconds(3); }
+
+    static bool IsQuiet(string rel)
     {
-        peer = peerName;
-        link = linkOf;
-        Text = peerName + " 공유 폴더 - 연동";
-        Icon = Tray.AppIcon;
-        BackColor = Bg; ForeColor = Color.White;
-        Font = new Font("Segoe UI", 9.5f);
-        Size = new Size(720, 520);
-        StartPosition = FormStartPosition.CenterScreen;
-        AllowDrop = true;
-
-        var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, Padding = new Padding(8, 8, 8, 0), BackColor = Bg };
-        up = Btn("위로", delegate { if (path != "") Go(path.Contains("\\") ? path.Substring(0, path.LastIndexOf('\\')) : ""); });
-        refresh = Btn("새로고침", delegate { Go(path); });
-        get = Btn("받기", delegate { Download(); });
-        get.BackColor = Accent;
-        top.Controls.AddRange(new Control[] { up, refresh, get });
-        where = new Label { Dock = DockStyle.Top, Height = 24, Padding = new Padding(10, 4, 10, 0), ForeColor = Dim };
-        status = new Label { Dock = DockStyle.Bottom, Height = 28, Padding = new Padding(10, 6, 10, 0), ForeColor = Dim,
-            Text = "파일을 이 창에 끌어다 놓으면 지금 폴더로 올립니다." };
-        list = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, BackColor = Panel2, ForeColor = Color.White,
-            BorderStyle = BorderStyle.None, HideSelection = false };
-        list.Columns.Add("이름", 480);
-        list.Columns.Add("크기", 120, HorizontalAlignment.Right);
-        list.DoubleClick += delegate
+        lock (quiet)
         {
-            if (list.SelectedItems.Count == 1 && (long)list.SelectedItems[0].Tag < 0)
-                Go(path == "" ? list.SelectedItems[0].Text : path + "\\" + list.SelectedItems[0].Text);
-        };
-        Controls.Add(list);
-        Controls.Add(status);
-        Controls.Add(where);
-        Controls.Add(top);
-        DragEnter += (s, e) => e.Effect = !busy && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
-        DragDrop += (s, e) => Upload(e.Data.GetData(DataFormats.FileDrop) as string[]);
-        Shown += delegate { Go(""); };
-    }
-
-    Button Btn(string text, EventHandler click)
-    {
-        var b = new Button { Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat, BackColor = Panel2, ForeColor = Color.White, Margin = new Padding(0, 0, 8, 0) };
-        b.FlatAppearance.BorderSize = 0;
-        b.Click += click;
-        return b;
-    }
-
-    void Say(string t) { try { BeginInvoke((Action)(() => status.Text = t)); } catch { } }
-
-    // 일은 뒤에서 하고, 끝나면 단추를 다시 켠 뒤 after(화면 스레드)를 부른다
-    void Run(Action work, Action after = null)
-    {
-        if (busy) return;
-        busy = true;
-        up.Enabled = get.Enabled = refresh.Enabled = false;
-        new Thread(() =>
-        {
-            bool ok = false;
-            try { work(); ok = true; }
-            catch (Exception e) { Say("실패: " + e.Message); }
-            finally
+            foreach (var kv in quiet.ToList())
             {
+                if (kv.Value < DateTime.UtcNow) { quiet.Remove(kv.Key); continue; }
+                if (rel.Equals(kv.Key, StringComparison.OrdinalIgnoreCase) || rel.StartsWith(kv.Key + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+    }
+
+    static void Watch()
+    {
+        var root = Root;
+        bool any; lock (gate) any = peers.Count > 0;
+        if (!any) root = null;
+        if (root == watching) return;
+        if (watcher != null) { watcher.Dispose(); watcher = null; }
+        watching = root;
+        if (root == null) return;
+        watcher = new FileSystemWatcher(root) { IncludeSubdirectories = true, InternalBufferSize = 64 * 1024,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size };
+        FileSystemEventHandler mark = (s, e) => Mark(root, e.FullPath);
+        watcher.Created += mark; watcher.Changed += mark; watcher.Deleted += mark;
+        watcher.Renamed += (s, e) => Renamed(root, e.OldFullPath, e.FullPath);
+        watcher.Error += (s, e) => { Log.Write("폴더 감시 놓침, 다시 맞춤: " + e.GetException().Message); Restart(); };
+        watcher.EnableRaisingEvents = true;
+        if (flusher == null) { flusher = new Thread(Flush) { IsBackground = true, Name = "sync-watch" }; flusher.Start(); }
+        Log.Write("공유 폴더 동기화 시작: " + root);
+    }
+
+    static void Mark(string root, string full)
+    {
+        if (!full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase) || Skip(Path.GetFileName(full))) return;
+        var rel = full.Substring(root.Length + 1);
+        if (IsQuiet(rel)) return;
+        lock (dirty) dirty[rel] = DateTime.UtcNow;
+    }
+
+    static void Renamed(string root, string oldFull, string newFull)
+    {
+        if (!newFull.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) return;
+        string from = oldFull.Substring(root.Length + 1), to = newFull.Substring(root.Length + 1);
+        if (Skip(Path.GetFileName(newFull))) return;
+        if (IsQuiet(from) || IsQuiet(to)) return;   // 받아서 바꾸는 중
+        if (Skip(Path.GetFileName(oldFull))) { Mark(root, newFull); return; }   // 임시 이름에서 바뀐 것은 새 파일로
+        lock (dirty) dirty.Remove(from);
+        List<Peer> ps; lock (gate) ps = peers.Where(x => !x.L.Closed).ToList();
+        foreach (var p in ps) Send(p, "move", from, to);
+        Log.Write("동기화 보냄(옮김): " + from + " → " + to);
+    }
+
+    // 0.8초 넘게 조용해진 것만 보낸다. 아직 쓰는 중이라 열 수 없는 파일은 다음에.
+    static void Flush()
+    {
+        while (true)
+        {
+            Thread.Sleep(500);
+            var root = watching; if (root == null) continue;
+            List<string> ready;
+            lock (dirty) ready = dirty.Where(kv => (DateTime.UtcNow - kv.Value).TotalMilliseconds > 800).Select(kv => kv.Key).ToList();
+            foreach (var rel in ready)
+            {
+                var full = Path.Combine(root, rel);
                 try
                 {
-                    BeginInvoke((Action)(() =>
-                    {
-                        busy = false;
-                        up.Enabled = get.Enabled = refresh.Enabled = true;
-                        if (ok && after != null) after();
-                    }));
+                    if (File.Exists(full)) { using (new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { } }
                 }
-                catch { busy = false; }
-            }
-        }) { IsBackground = true, Name = "share-ui" }.Start();
-    }
-
-    void Go(string p)
-    {
-        Run(() =>
-        {
-            var r = Share.Ask(link(), new Dictionary<string, object> { { "op", "list" }, { "path", p } });
-            var items = ((IEnumerable)r["items"]).Cast<Dictionary<string, object>>().ToList();
-            BeginInvoke((Action)(() =>
-            {
-                path = p;
-                where.Text = peer + " \\ " + p;
-                list.BeginUpdate();
-                list.Items.Clear();
-                foreach (var it in items)
+                catch (IOException) { continue; }   // 아직 쓰는 중
+                lock (dirty) dirty.Remove(rel);
+                List<Peer> ps; lock (gate) ps = peers.Where(x => !x.L.Closed).ToList();
+                try
                 {
-                    long size = Convert.ToInt64(it["size"]);
-                    var row = new ListViewItem(new[] { Convert.ToString(it["name"]), size < 0 ? "폴더" : FileXfer.Mb(size) }) { Tag = size };
-                    list.Items.Add(row);
+                    if (File.Exists(full)) foreach (var p in ps) Put(p, rel);
+                    else if (Directory.Exists(full))
+                        foreach (var p in ps)
+                        {
+                            Send(p, "mkdir", rel);
+                            foreach (var f in Directory.GetFiles(full, "*", System.IO.SearchOption.AllDirectories))
+                                if (!Skip(Path.GetFileName(f))) Put(p, f.Substring(root.Length + 1));
+                        }
+                    else foreach (var p in ps) Send(p, "del", rel);
+                    foreach (var p in ps) SaveKnown(p);
+                    Log.Write("동기화 보냄: " + rel + (File.Exists(full) ? "" : Directory.Exists(full) ? " (폴더)" : " (지움)"));
                 }
-                list.EndUpdate();
-                status.Text = items.Count + "개";
-            }));
-        });
-    }
-
-    void Download()
-    {
-        var names = list.SelectedItems.Cast<ListViewItem>().Select(i => i.Text).ToArray();
-        if (names.Length == 0) { status.Text = "받을 것을 먼저 고르세요."; return; }
-        string dest;
-        using (var d = new FolderBrowserDialog { Description = "받을 폴더", SelectedPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads") })
-        {
-            if (d.ShowDialog(this) != DialogResult.OK) return;
-            dest = d.SelectedPath;
+                catch (Exception e) { Log.Write("동기화 보내기 실패(" + rel + "): " + e.Message); }
+            }
         }
-        string from = path;
-        Run(() =>
-        {
-            var l = link();
-            var r = Share.Ask(l, new Dictionary<string, object> { { "op", "get" }, { "path", from }, { "names", names } });
-            int id;
-            var entries = FileXfer.ParseOffer(Encoding.UTF8.GetBytes(new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(r)), out id);
-            int n = Share.Receive(l, id, entries, dest, t => Say("받는 중: " + t));
-            Say(n + "개 받음: " + dest);
-            Process.Start(new ProcessStartInfo(dest) { UseShellExecute = true });
-        });
-    }
-
-    void Upload(string[] paths)
-    {
-        if (paths == null || paths.Length == 0) return;
-        string to = path;
-        Run(() =>
-        {
-            var entries = FileXfer.List(paths);
-            int id = Share.Register(entries);
-            var req = (Dictionary<string, object>)new JavaScriptSerializer { MaxJsonLength = int.MaxValue }
-                .DeserializeObject(Encoding.UTF8.GetString(FileXfer.OfferJson(id, entries)));
-            req["op"] = "put"; req["path"] = to;
-            Say("올리는 중: " + entries.Count(e => e.Size >= 0) + "개 (" + FileXfer.Mb(entries.Where(e => e.Size > 0).Sum(e => e.Size)) + ")");
-            var r = Share.Ask(link(), req, 24 * 3600 * 1000);   // 큰 파일은 오래 걸린다. 끊기면 그쪽 받기가 실패해 답이 온다
-            Say(Convert.ToInt32(r["count"]) + "개 올림");
-        }, () => Go(to));
     }
 }

@@ -46,7 +46,6 @@ class MainSide : Form
     bool ctrl, alt;
     Form hider;
     readonly Dictionary<SubState, ViewerForm> viewers = new Dictionary<SubState, ViewerForm>();   // 화면 창(ScreenView.cs)
-    readonly Dictionary<SubState, ShareForm> shares = new Dictionary<SubState, ShareForm>();      // 공유 폴더 창(Share.cs)
 
     public static void Run(Config c, Conn conn)
     {
@@ -62,8 +61,8 @@ class MainSide : Form
         Opacity = 0;
         foreach (var m in cfg.Subs) subs.Add(new SubState { M = m });
         RefreshLayout();
-        conn.OnLink = (l, m, hello) => { l.OnMessage = OnMessage; BeginInvoke((Action)(() => Register(l, m, hello))); };
-        conn.OnClosed = (l, m) => { FileXfer.Closed(l); BeginInvoke((Action)(() => OnClosed(l))); };
+        conn.OnLink = (l, m, hello) => { l.OnMessage = OnMessage; Share.Attach(l, m.Host); BeginInvoke((Action)(() => Register(l, m, hello))); };
+        conn.OnClosed = (l, m) => { FileXfer.Closed(l); Share.Detach(l); BeginInvoke((Action)(() => OnClosed(l))); };
         conn.OnPaired = m => BeginInvoke((Action)(() => { if (m.Role == "sub" && !subs.Any(x => x.M == m)) { subs.RemoveAll(x => x.M.Host == m.Host); subs.Add(new SubState { M = m }); RefreshLayout(); } UpdateTray(); }));
         SystemEvents.DisplaySettingsChanged += delegate { BeginInvoke((Action)RefreshLayout); };
 
@@ -259,16 +258,6 @@ class MainSide : Form
         lock (viewers) viewers[s] = v;
         v.FormClosed += delegate { lock (viewers) viewers.Remove(s); };
         v.Show();
-    }
-
-    void OpenShare(SubState s)
-    {
-        ShareForm f;
-        if (shares.TryGetValue(s, out f)) { f.Activate(); return; }
-        f = new ShareForm(s.M.Name, () => s.Link);
-        shares[s] = f;
-        f.FormClosed += delegate { shares.Remove(s); };
-        f.Show();
     }
 
     // ---------- 넘어가기 판정 (주 PC에 있을 때) ----------
@@ -547,7 +536,6 @@ class MainSide : Form
         {
             var t = s;
             m.Items.Add(t.M.Name + " 화면 보기", null, delegate { OpenViewer(t); });
-            m.Items.Add(t.M.Name + " 공유 폴더 열기", null, delegate { OpenShare(t); });
         }
         m.Items.Add("모니터 배치 정하기", null, delegate { OpenEditor(); });
         Tray.Common(m, cfg, conn, () => { GoLocal(back); tray.Visible = false; Application.Exit(); });
