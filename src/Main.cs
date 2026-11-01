@@ -45,6 +45,8 @@ class MainSide : Form
     readonly HashSet<int> localDown = new HashSet<int>();  // 넘어갈 때 이미 눌려 있던 키: 뗌은 주 PC로 흘려보낸다
     bool ctrl, alt;
     Form hider;
+    readonly Dictionary<SubState, ViewerForm> viewers = new Dictionary<SubState, ViewerForm>();   // 화면 창(ScreenView.cs)
+    readonly Dictionary<SubState, ShareForm> shares = new Dictionary<SubState, ShareForm>();      // 공유 폴더 창(Share.cs)
 
     public static void Run(Config c, Conn conn)
     {
@@ -122,7 +124,7 @@ class MainSide : Form
     void HiderDragEnter(object sender, DragEventArgs e)
     {
         e.Effect = DragDropEffects.None;
-        if (!probing || remote == null) return;
+        if (!probing || remote == null || !cfg.Files) return;
         probing = false;
         var paths = e.Data.GetData(DataFormats.FileDrop) as string[];
         if (paths == null || paths.Length == 0) return;
@@ -170,7 +172,8 @@ class MainSide : Form
 
     FileEntry MyEntry(int id, int idx)
     {
-        lock (offerGate) return id == myId && idx >= 0 && idx < myEntries.Count ? myEntries[idx] : null;
+        lock (offerGate) if (id == myId && idx >= 0 && idx < myEntries.Count) return myEntries[idx];
+        return Share.Entry(id, idx);
     }
 
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
@@ -187,12 +190,20 @@ class MainSide : Form
 
     void OnMessage(Link k, byte type, byte[] body)
     {
-        if (FileXfer.Handle(k, type, body)) return;
+        if (FileXfer.Handle(k, type, body) || Share.Handle(k, type, body)) return;
         var s = subs.FirstOrDefault(x => x.Link == k);
         if (s == null) return;
         if (type == Msg.FileReq) { FileXfer.Serve(k, body, MyEntry); return; }
+        if (type == Msg.ViewFrame || type == Msg.ViewStop)
+        {
+            ViewerForm v;
+            lock (viewers) viewers.TryGetValue(s, out v);
+            if (v == null) { if (type == Msg.ViewFrame) k.Send(Msg.ViewStop, null); return; }
+            if (type == Msg.ViewFrame) v.OnFrame(body); else v.OnStop(body.Length > 0 ? body[0] : (byte)0);
+            return;
+        }
         if (type == Msg.Edge) { var side = body[0]; var f = Link.Frac(body); BeginInvoke((Action)(() => OnEdge(s, side, f))); }
-        else if (type == Msg.FileOffer) BeginInvoke((Action)(() => { try { TakeOffer(s, body); } catch (Exception e) { Log.Write("파일 목록 받기 실패: " + e.Message); } }));
+        else if (type == Msg.FileOffer && cfg.Files) BeginInvoke((Action)(() => { try { TakeOffer(s, body); } catch (Exception e) { Log.Write("파일 목록 받기 실패: " + e.Message); } }));
         else if ((type == Msg.ClipText || type == Msg.ClipImage) && cfg.Clipboard)
             BeginInvoke((Action)(() =>
             {
@@ -214,6 +225,9 @@ class MainSide : Form
         }
         catch (Exception e) { Log.Write("화면 크기 저장 실패: " + e.Message); }
         Log.Write(s.M.Name + " 연결됨, 자리 " + (s.Zone.IsEmpty ? "없음" : R(s.Zone)));
+        ViewerForm v;
+        lock (viewers) viewers.TryGetValue(s, out v);
+        if (v != null) v.Restart();
         Tell(Program.LayoutText(cfg).Replace("\r\n", " | "));
         UpdateTray();
     }
@@ -230,7 +244,31 @@ class MainSide : Form
         var s = subs.FirstOrDefault(x => x.Link == k);
         if (s == null) return;
         if (remote == s) GoLocal(back);
+        ViewerForm v;
+        lock (viewers) viewers.TryGetValue(s, out v);
+        if (v != null) v.Closed2();
         UpdateTray();
+    }
+
+    void OpenViewer(SubState s)
+    {
+        ViewerForm v;
+        lock (viewers) viewers.TryGetValue(s, out v);
+        if (v != null) { v.Activate(); return; }
+        v = new ViewerForm(s);
+        lock (viewers) viewers[s] = v;
+        v.FormClosed += delegate { lock (viewers) viewers.Remove(s); };
+        v.Show();
+    }
+
+    void OpenShare(SubState s)
+    {
+        ShareForm f;
+        if (shares.TryGetValue(s, out f)) { f.Activate(); return; }
+        f = new ShareForm(s.M.Name, () => s.Link);
+        shares[s] = f;
+        f.FormClosed += delegate { shares.Remove(s); };
+        f.Show();
     }
 
     // ---------- 넘어가기 판정 (주 PC에 있을 때) ----------
@@ -505,6 +543,12 @@ class MainSide : Form
             m.Items.Add(new ToolStripMenuItem(s.M.Name + ": " + (s.Connected ? "연결됨" : "끊김") +
                 (remote == s ? ", 조작 중" : "")) { Enabled = false });
         m.Items.Add(new ToolStripSeparator());
+        foreach (var s in subs.Where(x => x.Connected))
+        {
+            var t = s;
+            m.Items.Add(t.M.Name + " 화면 보기", null, delegate { OpenViewer(t); });
+            m.Items.Add(t.M.Name + " 공유 폴더 열기", null, delegate { OpenShare(t); });
+        }
         m.Items.Add("모니터 배치 정하기", null, delegate { OpenEditor(); });
         Tray.Common(m, cfg, conn, () => { GoLocal(back); tray.Visible = false; Application.Exit(); });
     }

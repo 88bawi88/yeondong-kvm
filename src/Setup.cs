@@ -34,6 +34,29 @@ static class Tray
         var clipItem = new ToolStripMenuItem("클립보드 공유 (글·그림)") { Checked = c.Clipboard };
         clipItem.Click += delegate { c.Clipboard = !c.Clipboard; try { c.Save(); } catch { } Log.Write("클립보드 공유 " + (c.Clipboard ? "켬" : "끔")); };
         m.Items.Add(clipItem);
+        var fileItem = new ToolStripMenuItem("파일 끌어 놓기") { Checked = c.Files };
+        fileItem.Click += delegate { c.Files = !c.Files; try { c.Save(); } catch { } Log.Write("파일 끌어 놓기 " + (c.Files ? "켬" : "끔")); };
+        m.Items.Add(fileItem);
+        if (c.Role == "sub")
+        {
+            var viewItem = new ToolStripMenuItem("메인 PC가 이 화면 보기 허용") { Checked = c.ScreenShare };
+            viewItem.Click += delegate
+            {
+                c.ScreenShare = !c.ScreenShare; try { c.Save(); } catch { }
+                if (!c.ScreenShare) ScreenShare.Stop(null);
+                Log.Write("화면 보기 허용 " + (c.ScreenShare ? "켬" : "끔"));
+            };
+            m.Items.Add(viewItem);
+        }
+        var share = new ToolStripMenuItem(c.SharePath == "" ? "공유 폴더: 없음" : "공유 폴더: " + c.SharePath);
+        share.DropDownItems.Add("폴더 정하기...", null, delegate
+        {
+            using (var d = new FolderBrowserDialog { Description = "짝 맺은 PC가 둘러보고 파일을 주고받을 폴더", SelectedPath = c.SharePath })
+                if (d.ShowDialog() == DialogResult.OK) { c.SharePath = d.SelectedPath; try { c.Save(); } catch { } Log.Write("공유 폴더: " + c.SharePath); }
+        });
+        if (c.SharePath != "")
+            share.DropDownItems.Add("공유 끄기", null, delegate { c.SharePath = ""; try { c.Save(); } catch { } Log.Write("공유 폴더 끔"); });
+        m.Items.Add(share);
         m.Items.Add("로그 폴더 열기", null, delegate { Process.Start(new ProcessStartInfo(Program.Home) { UseShellExecute = true }); });
         m.Items.Add(new ToolStripMenuItem("연동 " + Program.Version) { Enabled = false });
         m.Items.Add(new ToolStripSeparator());

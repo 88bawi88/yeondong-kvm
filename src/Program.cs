@@ -17,7 +17,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("연동")]
 [assembly: System.Reflection.AssemblyProduct("Yeondong")]
-[assembly: System.Reflection.AssemblyVersion("0.5.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.6.0.0")]
 
 static class Program
 {
@@ -83,6 +83,7 @@ static class Program
     static int Run(string[] args)
     {
         var cfg = Config.Load();
+        Share.Cfg = cfg;
         try { Identity.Load(cfg.Id); }
         catch (Exception e) { MessageBox.Show("인증서를 만들지 못했습니다: " + e.Message, "연동"); return 1; }
         cfg.Save();

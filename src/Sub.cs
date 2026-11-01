@@ -53,6 +53,11 @@ static class Sub
             menu.Items.Add(new ToolStripMenuItem(mp == null ? "짝 맺은 메인 PC 없음" : "메인 PC " + mp.Name + ": " + (cur != null && !cur.Closed ? "연결됨" : "끊김")) { Enabled = false });
             menu.Items.Add(new ToolStripMenuItem("관리자 창·잠금 화면 조작: " + (AgentClient.Available ? "켜짐" : "꺼짐")) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
+            if (cur != null && !cur.Closed)
+            {
+                var name = mp != null ? mp.Name : "메인 PC";
+                menu.Items.Add(name + " 공유 폴더 열기", null, delegate { new ShareForm(name, () => cur).Show(); });
+            }
             Tray.Common(menu, cfg, conn, Quit);
         };
         tray.ContextMenuStrip = menu;
@@ -79,6 +84,7 @@ static class Sub
         conn.OnClosed = (l, m) =>
         {
             FileXfer.Closed(l);
+            ScreenShare.Stop(l);
             if (cur != l) return;
             lock (gate) { cur = null; active = false; ReleaseAll(); }
             PostOverlay();
@@ -129,7 +135,7 @@ static class Sub
     static bool ProbeEdge(Link l, byte side, float frac)
     {
         if (probing) return true;
-        if (!btns.Contains(0) || probed) return false;
+        if (!btns.Contains(0) || probed || !cfg.Files) return false;
         probed = probing = true;
         probeLink = l; probeSide = side; probeFrac = frac;
         Ui(StartProbe);
@@ -200,7 +206,8 @@ static class Sub
 
     static FileEntry MyEntry(int id, int idx)
     {
-        lock (offerGate) return id == myId && idx >= 0 && idx < myEntries.Count ? myEntries[idx] : null;
+        lock (offerGate) if (id == myId && idx >= 0 && idx < myEntries.Count) return myEntries[idx];
+        return Share.Entry(id, idx);
     }
 
     // 주 PC에서 끌고 넘어온 파일 목록. 이 자리에서 끌기를 이어 가고, 놓으면 탐색기가 그때 하나씩 받아 간다.
@@ -233,9 +240,16 @@ static class Sub
     {
         try
         {
-            if (FileXfer.Handle(l, type, b)) return;
+            if (FileXfer.Handle(l, type, b) || Share.Handle(l, type, b)) return;
             switch (type)
             {
+                case Msg.ViewStart:
+                    if (cfg.ScreenShare) ScreenShare.Start(l, BitConverter.ToInt32(b, 0));
+                    else l.Send(Msg.ViewStop, new byte[] { 1 });
+                    break;
+                case Msg.ViewStop: ScreenShare.Stop(l); break;
+                case Msg.ViewAck: ScreenShare.Ack(); break;
+                case Msg.ViewPoint: DoViewPoint(BitConverter.ToSingle(b, 0), BitConverter.ToSingle(b, 4)); break;
                 case Msg.Enter: DoEnter(b[0], Link.Frac(b)); break;
                 case Msg.Leave: lock (gate) { active = false; ReleaseAll(); } PostOverlay(); break;
                 case Msg.Move: DoMove(l, BitConverter.ToInt32(b, 0), BitConverter.ToInt32(b, 4)); break;
@@ -244,6 +258,7 @@ static class Sub
                 case Msg.Key: DoKey(BitConverter.ToUInt16(b, 0), BitConverter.ToUInt16(b, 2), b[4]); break;
                 case Msg.Info: Log.Write("[메인 PC] " + Encoding.UTF8.GetString(b)); break;
                 case Msg.FileOffer:
+                    if (!cfg.Files) break;
                     byte[] ob = b;
                     Ui(delegate { try { TakeOffer(ob); } catch (Exception e) { Log.Write("파일 목록 받기 실패: " + e.Message); } });
                     break;
@@ -274,6 +289,27 @@ static class Sub
             p.Y = Math.Max(sb.Top, Math.Min(sb.Bottom - 1, p.Y));
             pos = p;
             active = true;
+            MoveAbs(pos);
+        }
+    }
+
+    // 메인 PC의 화면 창 위 위치(가상 화면 비율). 음수면 커서는 두고 입력만 받기 시작한다.
+    static void DoViewPoint(float fx, float fy)
+    {
+        lock (gate)
+        {
+            active = true;
+            if (fx < 0 || fy < 0) return;
+            var vs = SystemInformation.VirtualScreen;
+            var p = new Point(vs.Left + (int)(fx * (vs.Width - 1) + 0.5f), vs.Top + (int)(fy * (vs.Height - 1) + 0.5f));
+            if (!OnAnyScreen(p.X, p.Y))   // 모니터 사이 빈 곳이면 가장 가까운 모니터 안으로
+            {
+                var sb = Screen.FromPoint(p).Bounds;
+                p.X = Math.Max(sb.Left, Math.Min(sb.Right - 1, p.X));
+                p.Y = Math.Max(sb.Top, Math.Min(sb.Bottom - 1, p.Y));
+            }
+            if (p == pos) return;
+            pos = p;
             MoveAbs(pos);
         }
     }

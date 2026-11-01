@@ -26,6 +26,13 @@ static class Msg
     public const byte FileEnd = 35;   // 보내는 쪽: [요청 번호][0=끝까지 보냄, 1=실패]
     public const byte FileAck = 36;   // 받는 쪽: [요청 번호][지금까지 읽은 바이트 int64] 보내는 쪽이 너무 앞서 나가지 않게
     public const byte Info = 40;      // 메인→서브: UTF-8 글. 메인 PC 배치와 전환 기록을 서브 PC 로그에도 남긴다
+    public const byte ViewStart = 60; // 메인→서브: [최대 너비 int32] 서브 화면을 보내 달라 (ScreenView.cs)
+    public const byte ViewStop = 61;  // 양쪽: 그만. 서브→메인이면 [이유 1] 0=끝 1=서브에서 화면 보기를 꺼 둠
+    public const byte ViewFrame = 62; // 서브→메인: [가상 화면 x,y,w,h int32×4][JPEG]
+    public const byte ViewAck = 63;   // 메인→서브: 그림 하나를 그렸다
+    public const byte ViewPoint = 64; // 메인→서브: [x float][y float] 서브 가상 화면 안 비율 위치로 커서를 옮기고 입력을 받는다. 음수면 옮기지 않는다
+    public const byte ShareReq = 70;  // 양쪽: json {tag, op, ..} 공유 폴더 요청 (Share.cs)
+    public const byte ShareResp = 71; // 양쪽: json {tag, ..} 그 답
 
     // 변 번호. 서브 화면 기준이다.
     public const byte Left = 0, Top = 1, Right = 2, Bottom = 3;
