@@ -88,6 +88,7 @@ static class Sub
             Ui(delegate { SetTray(false); });
         };
         conn.OnPaired = m => Ui(delegate { SetTray(cur != null && !cur.Closed); });
+        StartMoveThread();
         conn.Start();
         Application.Run();
     }
@@ -233,11 +234,43 @@ static class Sub
 
     // ---- 받은 메시지 ----
 
+    // 이동은 읽기 스레드에서 바로 넣지 않고 쌓아 두었다가 넣기 스레드가 한꺼번에 넣는다.
+    // 넣기가 잠깐 늦어져도(도우미 파이프, 화면 전환) 밀린 이동이 하나씩 재생되며 끌려가지 않고, 읽기도 막히지 않는다.
+    static readonly object mv = new object();
+    static int mvX, mvY;
+    static Link mvLink;
+    static readonly AutoResetEvent mvWake = new AutoResetEvent(false);
+
+    static void QueueMove(Link l, int dx, int dy)
+    {
+        lock (mv) { mvX += dx; mvY += dy; mvLink = l; }
+        mvWake.Set();
+    }
+
+    static void StartMoveThread()
+    {
+        new Thread(() => { while (true) { mvWake.WaitOne(); try { FlushMove(); } catch (Exception e) { Log.Write("이동 넣기 오류: " + e.Message); } } })
+        { IsBackground = true, Name = "input-move", Priority = ThreadPriority.AboveNormal }.Start();
+    }
+
+    // 쌓인 이동을 넣는다. 단추·키를 넣기 전에도 불러서 순서를 지킨다(gate를 잡은 채 꺼내므로 앞선 이동이 먼저 들어간다).
+    static void FlushMove()
+    {
+        lock (gate)
+        {
+            int dx, dy; Link l;
+            lock (mv) { dx = mvX; dy = mvY; l = mvLink; mvX = mvY = 0; }
+            if ((dx != 0 || dy != 0) && l != null) DoMove(l, dx, dy);
+        }
+    }
+
     static void OnMessage(Link l, byte type, byte[] b)
     {
         try
         {
             if (FileXfer.Handle(l, type, b) || Share.Handle(l, type, b)) return;
+            if (type == Msg.Move) { QueueMove(l, BitConverter.ToInt32(b, 0), BitConverter.ToInt32(b, 4)); return; }
+            if (type >= Msg.Enter && type <= Msg.Key || type == Msg.ViewPoint) FlushMove();
             switch (type)
             {
                 case Msg.ViewStart:
@@ -249,7 +282,6 @@ static class Sub
                 case Msg.ViewPoint: DoViewPoint(BitConverter.ToSingle(b, 0), BitConverter.ToSingle(b, 4)); break;
                 case Msg.Enter: DoEnter(b[0], Link.Frac(b)); break;
                 case Msg.Leave: lock (gate) { active = false; ReleaseAll(); } PostOverlay(); break;
-                case Msg.Move: DoMove(l, BitConverter.ToInt32(b, 0), BitConverter.ToInt32(b, 4)); break;
                 case Msg.Button: DoButton(b[0], b[1] != 0); break;
                 case Msg.Wheel: DoWheel(b[0] != 0, BitConverter.ToInt32(b, 1)); break;
                 case Msg.Key: DoKey(BitConverter.ToUInt16(b, 0), BitConverter.ToUInt16(b, 2), b[4]); break;

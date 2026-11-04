@@ -36,12 +36,11 @@ class MainSide : Form
     System.Windows.Forms.Timer poll;
 
     public static volatile bool Busy;   // 서브 PC 조작 중
-    SubState remote;               // 지금 입력을 보내는 서브 PC. null이면 주 PC
+    volatile SubState remote;      // 지금 입력을 보내는 서브 PC. null이면 주 PC
     Point park, back;              // 숨겨 둔 커서 자리, 끊기면 돌아올 자리
     bool rawOn;
     int pushSum;
-    IntPtr mouseHook, keyHook;
-    W.HookProc mouseProc, keyProc; // 가비지 수집되지 않게 붙잡아 둔다
+    HookThread hooks;              // 훅은 전용 스레드에서 돈다(화면 스레드가 바빠도 마우스가 밀리지 않게)
     readonly HashSet<int> localDown = new HashSet<int>();  // 넘어갈 때 이미 눌려 있던 키: 뗌은 주 PC로 흘려보낸다
     bool ctrl, alt;
     Form hider;
@@ -72,8 +71,7 @@ class MainSide : Form
         tray.DoubleClick += delegate { OpenEditor(); };
         UpdateTray();
 
-        mouseProc = MouseHook;
-        keyProc = KeyHook;
+        hooks = new HookThread(MouseHook, KeyHook);
         hider = MakeHider();
         hider.DragEnter += HiderDragEnter;
 
@@ -369,9 +367,7 @@ class MainSide : Form
         localDown.Clear();
         for (int vk = 1; vk < 255; vk++) if ((W.GetAsyncKeyState(vk) & 0x8000) != 0) localDown.Add(vk);
         ctrl = alt = false;
-        var hm = W.GetModuleHandle(null);
-        mouseHook = W.SetWindowsHookEx(14, mouseProc, hm, 0);   // WH_MOUSE_LL
-        keyHook = W.SetWindowsHookEx(13, keyProc, hm, 0);       // WH_KEYBOARD_LL
+        hooks.Install();
         W.SetCursorPos(park.X, park.Y);
         hider.Location = new Point(park.X - 32, park.Y - 32);
         hider.Show();
@@ -391,8 +387,7 @@ class MainSide : Form
         remote = null;
         Busy = false;
         probing = false;
-        if (mouseHook != IntPtr.Zero) { W.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
-        if (keyHook != IntPtr.Zero) { W.UnhookWindowsHookEx(keyHook); keyHook = IntPtr.Zero; }
+        hooks.Remove();
         hider.Hide();
         if (s.Connected) s.Link.Send(Msg.Leave, null);
         // 모니터 밖 좌표면 가장 가까운 모니터 안으로 넣는다
@@ -420,13 +415,15 @@ class MainSide : Form
         if (dragFrom == s && (DateTime.Now - dragAt).TotalSeconds < 5) ContinueDrag();
     }
 
-    // ---------- 훅 (서브 PC에 있을 때만 걸려 있다) ----------
+    // ---------- 훅 (서브 PC에 있을 때만 걸려 있다. HookThread에서 불린다) ----------
     IntPtr MouseHook(int code, IntPtr wp, IntPtr lp)
     {
-        if (code < 0 || remote == null) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);
+        var r = remote;
+        if (code < 0 || r == null) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);
         var h = (W.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lp, typeof(W.MSLLHOOKSTRUCT));
         if ((h.flags & 1) != 0) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);   // 다른 프로그램이 넣은 입력
-        var l = remote.Link;
+        var l = r.Link;
+        if (l == null) return (IntPtr)1;
         int msg = wp.ToInt32();
         switch (msg)
         {
@@ -468,7 +465,8 @@ class MainSide : Form
 
     IntPtr KeyHook(int code, IntPtr wp, IntPtr lp)
     {
-        if (code < 0 || remote == null) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);
+        var r = remote;
+        if (code < 0 || r == null) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);
         var h = (W.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lp, typeof(W.KBDLLHOOKSTRUCT));
         if ((h.flags & 0x10) != 0) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);  // 주입된 입력
         bool up = (h.flags & 0x80) != 0;
@@ -485,7 +483,8 @@ class MainSide : Form
         BitConverter.GetBytes((ushort)vk).CopyTo(b, 0);
         BitConverter.GetBytes((ushort)h.scanCode).CopyTo(b, 2);
         b[4] = (byte)((up ? 1 : 0) | ((h.flags & 1) != 0 ? 2 : 0));
-        remote.Link.Send(Msg.Key, b);
+        var l = r.Link;
+        if (l != null) l.Send(Msg.Key, b);
         return (IntPtr)1;
     }
 
@@ -549,6 +548,65 @@ class MainSide : Form
     }
 }
 
+// 저수준 훅 전용 스레드. 훅은 건 스레드의 메시지 루프에서 불리므로, 화면 스레드에 걸면 클립보드 읽기·창 그리기 동안
+// 마우스가 멈추고, 오래 막히면 Windows가 훅을 말없이 떼어 버린다. 그래서 따로 스레드를 두고 걸고 뗀다.
+class HookThread
+{
+    readonly W.HookProc mouseProc, keyProc;   // 가비지 수집되지 않게 붙잡아 둔다
+    readonly AutoResetEvent done = new AutoResetEvent(false);
+    uint tid;
+    IntPtr mouseHook, keyHook;
+    const uint WM_INSTALL = 0x8001, WM_REMOVE = 0x8002;
+
+    public HookThread(W.HookProc mouse, W.HookProc key)
+    {
+        mouseProc = mouse;
+        keyProc = key;
+        var t = new Thread(Loop) { IsBackground = true, Name = "input-hook", Priority = ThreadPriority.Highest };
+        t.Start();
+        done.WaitOne();   // 메시지 큐가 생길 때까지
+    }
+
+    public void Install() { Call(WM_INSTALL); }
+    public void Remove() { Call(WM_REMOVE); }
+
+    void Call(uint msg)
+    {
+        if (W.PostThreadMessage(tid, msg, IntPtr.Zero, IntPtr.Zero)) done.WaitOne(1000);
+        else Log.Write("훅 스레드에 보내기 실패: " + Marshal.GetLastWin32Error());
+    }
+
+    void Loop()
+    {
+        tid = W.GetCurrentThreadId();
+        W.MSG m;
+        W.PeekMessage(out m, IntPtr.Zero, 0, 0, 0);   // 메시지 큐를 만든다
+        done.Set();
+        while (W.GetMessage(out m, IntPtr.Zero, 0, 0) > 0)
+        {
+            if (m.message == WM_INSTALL)
+            {
+                var hm = W.GetModuleHandle(null);
+                if (mouseHook == IntPtr.Zero) mouseHook = W.SetWindowsHookEx(14, mouseProc, hm, 0);   // WH_MOUSE_LL
+                if (keyHook == IntPtr.Zero) keyHook = W.SetWindowsHookEx(13, keyProc, hm, 0);         // WH_KEYBOARD_LL
+                if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) Log.Write("훅 걸기 실패: " + Marshal.GetLastWin32Error());
+                done.Set();
+            }
+            else if (m.message == WM_REMOVE)
+            {
+                if (mouseHook != IntPtr.Zero) { W.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+                if (keyHook != IntPtr.Zero) { W.UnhookWindowsHookEx(keyHook); keyHook = IntPtr.Zero; }
+                done.Set();
+            }
+            else
+            {
+                W.TranslateMessage(ref m);
+                W.DispatchMessage(ref m);
+            }
+        }
+    }
+}
+
 // 띄워도 포커스를 가져가지 않는 창(게임·작업 중인 창의 포커스를 지킨다)
 class HiderForm : Form
 {
@@ -568,7 +626,14 @@ static class W
     [StructLayout(LayoutKind.Sequential)] public struct MSLLHOOKSTRUCT { public POINT pt; public uint mouseData, flags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] public struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTDEVICE { public ushort usUsagePage, usUsage; public uint dwFlags; public IntPtr hwndTarget; }
-    [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
+    [StructLayout(LayoutKind.Sequential)] public struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public POINT pt; }
+    [DllImport("user32.dll")] public static extern int GetMessage(out MSG m, IntPtr h, uint min, uint max);
+    [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG m, IntPtr h, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] public static extern bool TranslateMessage(ref MSG m);
+    [DllImport("user32.dll")] public static extern IntPtr DispatchMessage(ref MSG m);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostThreadMessage(uint tid, uint msg, IntPtr wp, IntPtr lp);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
     [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr wp, IntPtr lp);
     [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string name);
