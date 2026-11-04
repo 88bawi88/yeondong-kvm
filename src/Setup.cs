@@ -60,6 +60,13 @@ static class Tray
         });
         var share = new ToolStripMenuItem(c.SharePath == "" ? "공유 폴더 동기화: 꺼짐" : "공유 폴더 동기화: " + c.SharePath);
         share.DropDownItems.Add("폴더 정하기...", null, delegate { choose(); });
+        var recv = new ToolStripMenuItem("받기만 하기(이 PC 변경은 보내지 않음)") { Checked = c.ShareRecvOnly };
+        recv.Click += delegate
+        {
+            c.ShareRecvOnly = !c.ShareRecvOnly; try { c.Save(); } catch { }
+            Log.Write("공유 폴더 받기만 하기 " + (c.ShareRecvOnly ? "켬" : "끔")); Share.Restart();
+        };
+        share.DropDownItems.Add(recv);
         if (c.SharePath != "")
             share.DropDownItems.Add("동기화 끄기", null, delegate { c.SharePath = ""; try { c.Save(); } catch { } Log.Write("공유 폴더 끔"); Share.Restart(); });
         m.Items.Add(share);

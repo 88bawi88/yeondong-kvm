@@ -51,6 +51,7 @@ static class Share
         public string Id;
         public readonly BlockingCollection<Action> Work = new BlockingCollection<Action>();   // 받은 일을 차례로(받기는 오래 걸린다)
         public Dictionary<string, long> Known;   // 마지막으로 양쪽에 같이 있던 파일 → 수정 시각
+        public bool RecvOnly;                    // 상대는 받기만 한다(상대에 없는 것을 지우지 않고, 이미 준 것을 다시 주지 않는다)
     }
     static readonly List<Peer> peers = new List<Peer>();
 
@@ -58,6 +59,8 @@ static class Share
     {
         get { var r = Cfg == null ? "" : Cfg.SharePath; return r != "" && Directory.Exists(r) ? Path.GetFullPath(r).TrimEnd('\\') : null; }
     }
+
+    static bool RecvOnly { get { return Cfg != null && Cfg.ShareRecvOnly; } }
 
     public static void Attach(Link l, string peerId)
     {
@@ -93,7 +96,7 @@ static class Share
         if (root == null || p.L.Closed) return;
         var files = new List<object>(); var dirs = new List<object>();
         foreach (var kv in Scan(root, dirs)) files.Add(new Dictionary<string, object> { { "rel", kv.Key }, { "size", kv.Value.Length }, { "mtime", kv.Value.LastWriteTimeUtc.Ticks } });
-        p.L.Send(Msg.SyncList, Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string, object> { { "files", files }, { "dirs", dirs } })));
+        p.L.Send(Msg.SyncList, Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string, object> { { "files", files }, { "dirs", dirs }, { "recvOnly", RecvOnly } })));
         Log.Write("동기화 목록 보냄(" + p.L.Name + "): 파일 " + files.Count + "개");
     }
 
@@ -109,8 +112,10 @@ static class Share
 
     static bool Skip(string name)
     {
-        // 연동 임시 파일, 바꿔치기할 때 Windows가 잠깐 만드는 이름(~RF….TMP), 오피스 잠금 파일(~$…)은 맞추지 않는다
-        return name.StartsWith(".~yd") || name.StartsWith("~$") || (name.Contains("~RF") && name.EndsWith(".TMP", StringComparison.OrdinalIgnoreCase))
+        // 연동 임시 파일, 바꿔치기할 때 Windows가 잠깐 만드는 이름(~RF….TMP), 오피스 잠금 파일(~$…), 브라우저가 받는 중인 파일은 맞추지 않는다
+        return name.StartsWith(".~yd")
+            || name.EndsWith(".crdownload", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".download", StringComparison.OrdinalIgnoreCase) || name.StartsWith("~$") || (name.Contains("~RF") && name.EndsWith(".TMP", StringComparison.OrdinalIgnoreCase))
             || name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) || name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -129,9 +134,11 @@ static class Share
     static void Reconcile(Peer p, Dictionary<string, object> d)
     {
         var root = Root; if (root == null) return;
+        p.RecvOnly = d.ContainsKey("recvOnly") && Convert.ToBoolean(d["recvOnly"]);
+        if (RecvOnly) return;   // 받기만 하니 상대 목록에 맞춰 보내거나 지우지 않는다
         var remote = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         foreach (Dictionary<string, object> f in (IEnumerable)d["files"]) remote[Convert.ToString(f["rel"])] = Convert.ToInt64(f["mtime"]);
-        foreach (var rel in ((IEnumerable)d["dirs"]).Cast<object>().Select(Convert.ToString))
+        foreach (var rel in p.RecvOnly ? Enumerable.Empty<string>() : ((IEnumerable)d["dirs"]).Cast<object>().Select(Convert.ToString))
         {
             var path = Resolve(root, rel);
             if (path != null && !Directory.Exists(path) && !File.Exists(path)) { Quiet(rel); Directory.CreateDirectory(path); }
@@ -145,7 +152,11 @@ static class Share
                 if (mine > theirs + Slack) { Put(p, kv.Key); sent++; }
                 else if (Math.Abs(mine - theirs) <= Slack) p.Known[kv.Key] = mine;
             }
-            else if (p.Known.TryGetValue(kv.Key, out known) && Math.Abs(known - mine) <= Slack) { Delete(kv.Key); p.Known.Remove(kv.Key); gone++; }
+            else if (p.Known.TryGetValue(kv.Key, out known) && Math.Abs(known - mine) <= Slack)
+            {
+                if (p.RecvOnly) continue;   // 이미 준 것을 상대가 지웠다. 다시 주지도, 여기서 지우지도 않는다
+                Delete(kv.Key); p.Known.Remove(kv.Key); gone++;
+            }
             else { Put(p, kv.Key); sent++; }
         }
         SaveKnown(p);
@@ -175,7 +186,7 @@ static class Share
                     using (var dst = new FileStream(tmp, FileMode.CreateNew))
                         src.CopyTo(dst, 1 << 16);
                     File.SetLastWriteTimeUtc(tmp, new DateTime(mtime, DateTimeKind.Utc));
-                    if (File.Exists(path)) File.Delete(path);
+                    if (File.Exists(path)) { if (RecvOnly) Delete(rel); else File.Delete(path); }   // 받기만 하는 폴더(다운로드 등)에 있던 같은 이름 파일은 휴지통으로
                     File.Move(tmp, path);
                 }
                 finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } Quiet(rel); }
@@ -184,6 +195,7 @@ static class Share
                 Relay(p, delegate(Peer o) { Put(o, rel); });
                 break;
             case "del":
+                if (RecvOnly) break;   // 받은 것은 상대가 지워도 남겨 둔다
                 if (!File.Exists(path) && !Directory.Exists(path)) break;
                 Delete(rel);
                 ForgetUnder(p, rel);
@@ -223,6 +235,7 @@ static class Share
         var root = Root; if (root == null) return;
         var fi = new FileInfo(Path.Combine(root, rel));
         if (!fi.Exists) return;
+        if (Busy(fi)) { lock (dirty) dirty[rel] = DateTime.UtcNow; return; }   // 쓰기가 끝나면 Flush가 보낸다
         int id = Register(new FileEntry { Rel = rel, Full = fi.FullName, Size = fi.Length });
         p.Known[rel] = fi.LastWriteTimeUtc.Ticks;
         p.L.Send(Msg.SyncOp, Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string, object> {
@@ -320,7 +333,7 @@ static class Share
     {
         var root = Root;
         bool any; lock (gate) any = peers.Count > 0;
-        if (!any) root = null;
+        if (!any || RecvOnly) root = null;
         if (root == watching) return;
         if (watcher != null) { watcher.Dispose(); watcher = null; }
         watching = root;
@@ -357,7 +370,18 @@ static class Share
         Log.Write("동기화 보냄(옮김): " + from + " → " + to);
     }
 
-    // 0.8초 넘게 조용해진 것만 보낸다. 아직 쓰는 중이라 열 수 없는 파일은 다음에.
+    // 다른 프로그램이 쓰기로 열어 두었거나 2초 안에 바뀐 파일. 다 받기 전에 보내면 커질 때마다 처음부터 다시 보내게 된다.
+    static bool Busy(FileInfo fi)
+    {
+        fi.Refresh();
+        var age = (DateTime.UtcNow - fi.LastWriteTimeUtc).TotalSeconds;
+        if (age >= 0 && age < 2) return true;
+        try { using (new FileStream(fi.FullName, FileMode.Open, FileAccess.Read, FileShare.Read)) { } return false; }
+        catch (IOException) { return true; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    // 0.8초 넘게 조용해진 것만 보낸다. 아직 쓰는 중인 파일은 다음에.
     static void Flush()
     {
         while (true)
@@ -369,11 +393,7 @@ static class Share
             foreach (var rel in ready)
             {
                 var full = Path.Combine(root, rel);
-                try
-                {
-                    if (File.Exists(full)) { using (new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { } }
-                }
-                catch (IOException) { continue; }   // 아직 쓰는 중
+                if (File.Exists(full) && Busy(new FileInfo(full))) continue;   // 아직 쓰는 중
                 lock (dirty) dirty.Remove(rel);
                 List<Peer> ps; lock (gate) ps = peers.Where(x => !x.L.Closed).ToList();
                 try

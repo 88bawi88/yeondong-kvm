@@ -33,6 +33,7 @@ class Config
     public bool Files = true;             // 파일 끌어 놓기
     public bool ScreenShare = true;       // 짝 맺은 메인 PC가 이 PC 화면을 창으로 보고 조작하게 둔다(서브 PC)
     public string SharePath = "";         // 공유 폴더. 비어 있으면 공유하지 않는다
+    public bool ShareRecvOnly;            // 공유 폴더에 받기만 한다(이 PC에서 바뀐 것·지운 것은 상대에 보내지 않고, 상대가 지운 것도 지우지 않는다)
     public bool Consent;                  // 처음 실행 때 안내에 동의했나
     public List<Machine> Peers = new List<Machine>();
 
@@ -55,6 +56,7 @@ class Config
                 if (d.ContainsKey("files")) c.Files = Convert.ToBoolean(d["files"]);
                 if (d.ContainsKey("screenShare")) c.ScreenShare = Convert.ToBoolean(d["screenShare"]);
                 c.SharePath = Str(d, "sharePath");
+                if (d.ContainsKey("shareRecvOnly")) c.ShareRecvOnly = Convert.ToBoolean(d["shareRecvOnly"]);
                 if (d.ContainsKey("consent")) c.Consent = Convert.ToBoolean(d["consent"]);
                 if (d.ContainsKey("peers"))
                     foreach (Dictionary<string, object> p in (IEnumerable)d["peers"])
@@ -87,7 +89,7 @@ class Config
             var d = new Dictionary<string, object>
             {
                 { "id", Id }, { "name", Name }, { "role", Role }, { "port", Port }, { "push", Push },
-                { "clipboard", Clipboard }, { "files", Files }, { "screenShare", ScreenShare }, { "sharePath", SharePath }, { "consent", Consent },
+                { "clipboard", Clipboard }, { "files", Files }, { "screenShare", ScreenShare }, { "sharePath", SharePath }, { "shareRecvOnly", ShareRecvOnly }, { "consent", Consent },
                 { "peers", Peers.Select(p => new Dictionary<string, object> {
                     { "id", p.Host }, { "name", p.Name }, { "thumb", p.Thumb }, { "role", p.Role }, { "addr", p.Addr }, { "port", p.Port },
                     { "zone", p.ZoneRect }, { "screen", p.Screen } }).ToArray() },
