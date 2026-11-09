@@ -270,7 +270,7 @@ static class Sub
         {
             if (FileXfer.Handle(l, type, b) || Share.Handle(l, type, b)) return;
             if (type == Msg.Move) { QueueMove(l, BitConverter.ToInt32(b, 0), BitConverter.ToInt32(b, 4)); return; }
-            if (type >= Msg.Enter && type <= Msg.Key || type == Msg.ViewPoint) FlushMove();
+            if (type >= Msg.Enter && type <= Msg.Jump || type == Msg.ViewPoint) FlushMove();
             switch (type)
             {
                 case Msg.ViewStart:
@@ -281,6 +281,7 @@ static class Sub
                 case Msg.ViewAck: ScreenShare.Ack(); break;
                 case Msg.ViewPoint: DoViewPoint(BitConverter.ToSingle(b, 0), BitConverter.ToSingle(b, 4)); break;
                 case Msg.Enter: DoEnter(b[0], Link.Frac(b)); break;
+                case Msg.Jump: DoJump(); break;
                 case Msg.Leave: lock (gate) { active = false; ReleaseAll(); } PostOverlay(); break;
                 case Msg.Button: DoButton(b[0], b[1] != 0); break;
                 case Msg.Wheel: DoWheel(b[0] != 0, BitConverter.ToInt32(b, 1)); break;
@@ -320,6 +321,26 @@ static class Sub
             active = true;
             MoveAbs(pos);
         }
+    }
+
+    // 단축키로 넘어왔다. 커서는 지금 자리(없으면 주 모니터 가운데)에 두고, 어디인지 잠깐 보여 준다.
+    static void DoJump()
+    {
+        Point p;
+        lock (gate)
+        {
+            p = pos;
+            try { var c = Cursor.Position; if (OnAnyScreen(c.X, c.Y)) p = c; } catch { }
+            if (!OnAnyScreen(p.X, p.Y))
+            {
+                var b = Screen.PrimaryScreen.Bounds;
+                p = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
+            }
+            pos = p;
+            active = true;
+            MoveAbs(pos);
+        }
+        Ui(delegate { Locator.Flash(p, cfg.Name); });
     }
 
     // 메인 PC의 화면 창 위 위치(가상 화면 비율). 음수면 커서는 두고 입력만 받기 시작한다.

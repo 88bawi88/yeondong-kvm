@@ -17,6 +17,7 @@ static class Msg
     public const byte Button = 13;    // 메인→서브: [button 1][down 1]  0=왼 1=오른 2=가운데 3=X1 4=X2
     public const byte Wheel = 14;     // 메인→서브: [horizontal 1][delta int32]
     public const byte Key = 15;       // 메인→서브: [vk uint16][scan uint16][flags 1]  bit0=뗌 bit1=확장키
+    public const byte Jump = 16;      // 메인→서브: 단축키로 넘어옴. 커서는 지금 자리에 두고 입력을 받기 시작하며, 위치 표시를 띄운다
     public const byte Edge = 20;      // 서브→메인: [side 1][frac float] 서브 화면 그 변에서 바깥으로 밀었다
     public const byte ClipText = 30;  // 양쪽: UTF-8 글
     public const byte ClipImage = 31; // 양쪽: PNG

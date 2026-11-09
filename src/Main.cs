@@ -4,6 +4,8 @@
 // 넘어가면 커서를 그 모니터 가운데에 숨겨 두고 저수준 훅으로 입력을 막아 서브 PC로 보낸다.
 // 서브 PC가 자기 화면 가장자리에서 밀었다고 알려 오면, 그 변이 주 PC 모니터와 맞닿은 곳일 때만 돌아온다.
 // 비상 복귀: Ctrl+Alt+Home. 연결이 끊겨도 곧바로 돌아온다.
+// 단축키 전환: Alt+`(RegisterHotKey). 마지막에 쓴 서브 PC의 커서 자리로 넘어가고, 다시 누르면 떠난 자리로 돌아온다.
+// 단축키로 오가면 도착한 PC 화면에 커서 위치와 PC 이름을 잠깐 띄운다(Locator.cs).
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -37,6 +39,8 @@ class MainSide : Form
 
     public static volatile bool Busy;   // 서브 PC 조작 중
     volatile SubState remote;      // 지금 입력을 보내는 서브 PC. null이면 주 PC
+    SubState last;                 // 마지막으로 넘어간 서브 PC. 단축키는 여기로 간다
+    const int HotId = 1;
     Point park, back;              // 숨겨 둔 커서 자리, 끊기면 돌아올 자리
     bool rawOn;
     int pushSum;
@@ -90,6 +94,11 @@ class MainSide : Form
             clip = new Clip();
             clip.OnLocalChange = (t, b) => { if (!cfg.Clipboard) return; foreach (var s in subs) if (s.Connected) s.Link.Send(t, b); };
             conn.Start();
+            if (!W.RegisterHotKey(Handle, HotId, 0x1 | 0x4000, 0xC0))   // MOD_ALT | MOD_NOREPEAT, VK_OEM_3(`)
+            {
+                Log.Write("Alt+` 단축키 등록 실패: " + Marshal.GetLastWin32Error());
+                tray.ShowBalloonTip(5000, "연동", "다른 프로그램이 Alt+`를 쓰고 있어 전환 단축키를 켜지 못했습니다.", ToolTipIcon.Warning);
+            }
         }
         base.SetVisibleCore(false);
     }
@@ -314,7 +323,23 @@ class MainSide : Form
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == 0x00FF && rawOn && remote == null) OnRaw(m.LParam);  // WM_INPUT
+        if (m.Msg == 0x0312 && m.WParam.ToInt32() == HotId) { HotKey(); return; }   // WM_HOTKEY
         base.WndProc(ref m);
+    }
+
+    // Alt+`를 주 PC에서 눌렀다. 서브 PC에 있을 때는 KeyHook이 받는다(훅이 키를 먼저 막으므로 여기로 오지 않는다).
+    void HotKey()
+    {
+        if (remote != null) { GoLocal(back); Locator.Flash(Cursor.Position, cfg.Name); return; }
+        var s = last != null && last.Connected ? last : subs.FirstOrDefault(x => x.Connected);
+        if (s == null) { Balloon("연결된 서브 PC가 없습니다."); return; }
+        if (CursorClipped()) return;   // 게임이 커서를 가둬 둔 중
+        // Alt를 뗄 때 주 PC 창의 메뉴가 열리지 않게, 아무 일도 안 하는 키를 한 번 끼워 넣는다
+        keybd_event(0xE8, 0, 0, UIntPtr.Zero);
+        keybd_event(0xE8, 0, 2, UIntPtr.Zero);
+        W.POINT p;
+        W.GetCursorPos(out p);
+        GoRemote(s, 0, 0, new Point(p.X, p.Y), true);
     }
 
     void OnRaw(IntPtr hRaw)
@@ -356,27 +381,33 @@ class MainSide : Form
     }
 
     // ---------- 전환 ----------
-    void GoRemote(SubState s, byte side, float frac, Point from)
+    // jump면 서브 커서를 그 자리에 둔 채 넘어간다(단축키). 아니면 서브 화면의 side 변 frac 위치에 놓는다.
+    void GoRemote(SubState s, byte side, float frac, Point from, bool jump = false)
     {
         SetRaw(false);
         remote = s;
+        last = s;
         Busy = true;
         back = from;
         var mb = mons.First(m => m.Contains(from));
         park = new Point(mb.Left + mb.Width / 2, mb.Top + mb.Height / 2);
         localDown.Clear();
         for (int vk = 1; vk < 255; vk++) if ((W.GetAsyncKeyState(vk) & 0x8000) != 0) localDown.Add(vk);
-        ctrl = alt = false;
+        // 넘어갈 때 누르고 있던 Ctrl·Alt도 단축키 판정에는 넣는다(Alt를 쥔 채 `만 다시 눌러 돌아올 수 있게)
+        ctrl = localDown.Contains(0x11) || localDown.Contains(0xA2) || localDown.Contains(0xA3);
+        alt = localDown.Contains(0x12) || localDown.Contains(0xA4) || localDown.Contains(0xA5);
         hooks.Install();
         W.SetCursorPos(park.X, park.Y);
         hider.Location = new Point(park.X - 32, park.Y - 32);
         hider.Show();
-        s.Link.SendSideFrac(Msg.Enter, side, frac);
+        if (jump) s.Link.Send(Msg.Jump, null);
+        else s.Link.SendSideFrac(Msg.Enter, side, frac);
         // 왼쪽 단추를 누른 채 넘어갔으면 파일을 끌고 있을 수 있다. 끌기 중인 탐색기가 숨김 창을 알아채게 커서를 1픽셀 흔든다.
         probing = localDown.Contains(1);
         if (probing) { mouse_event(0x1, 1, 0, 0, UIntPtr.Zero); mouse_event(0x1, -1, 0, 0, UIntPtr.Zero); }
-        Log.Write(s.M.Name + "(으)로 넘어감, 변 " + side + " 위치 " + frac.ToString("0.000"));
-        Tell("넘어옴, 변 " + side + " 위치 " + frac.ToString("0.000") + " (주 PC " + from.X + "," + from.Y + ")");
+        var how = jump ? "단축키" : "변 " + side + " 위치 " + frac.ToString("0.000");
+        Log.Write(s.M.Name + "(으)로 넘어감, " + how);
+        Tell("넘어옴, " + how + " (주 PC " + from.X + "," + from.Y + ")");
         UpdateTray();
     }
 
@@ -471,12 +502,25 @@ class MainSide : Form
         if ((h.flags & 0x10) != 0) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);  // 주입된 입력
         bool up = (h.flags & 0x80) != 0;
         int vk = (int)h.vkCode;
-        if (up && localDown.Remove(vk)) return W.CallNextHookEx(IntPtr.Zero, code, wp, lp);
         if (vk == 0x11 || vk == 0xA2 || vk == 0xA3) ctrl = !up;
         if (vk == 0x12 || vk == 0xA4 || vk == 0xA5) alt = !up;
+        // 넘어가기 전부터 누르고 있던 키는 뗄 때까지 주 PC 것이다(꾹 누른 동안의 반복 입력도 서브로 보내지 않는다)
+        if (localDown.Contains(vk)) { if (up) localDown.Remove(vk); return W.CallNextHookEx(IntPtr.Zero, code, wp, lp); }
         if (!up && vk == 0x24 && ctrl && alt)   // Ctrl+Alt+Home: 비상 복귀
         {
             BeginInvoke((Action)(() => GoLocal(back)));
+            return (IntPtr)1;
+        }
+        if (!up && vk == 0xC0 && alt && !ctrl)   // Alt+`: 주 PC로 돌아온다
+        {
+            // 서브에서 Alt가 떼어질 때 그쪽 창 메뉴가 열리지 않게, 아무 일도 안 하는 키를 먼저 넣게 한다
+            var lk = r.Link;
+            if (lk != null)
+            {
+                lk.Send(Msg.Key, new byte[] { 0xE8, 0, 0, 0, 0 });
+                lk.Send(Msg.Key, new byte[] { 0xE8, 0, 0, 0, 1 });
+            }
+            BeginInvoke((Action)(() => { GoLocal(back); Locator.Flash(Cursor.Position, cfg.Name); }));
             return (IntPtr)1;
         }
         var b = new byte[5];
@@ -644,5 +688,6 @@ static class W
     [DllImport("user32.dll")] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint size);
     [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint headSize);
     [DllImport("kernel32.dll")] public static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
     [DllImport("user32.dll")] public static extern IntPtr CreateCursor(IntPtr inst, int x, int y, int w, int h, byte[] and, byte[] xor);
 }
