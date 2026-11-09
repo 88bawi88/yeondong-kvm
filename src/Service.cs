@@ -172,6 +172,7 @@ class AgentService : ServiceBase
     {
         Log.Write("서비스 시작");
         try { Updater.Start(); } catch (Exception e) { Log.Write("업데이터 시작 실패: " + e.Message); }
+        new Thread(() => Elevated.RegisterLogonTask(SvcUtil.Exe())) { IsBackground = true, Name = "logon-task" }.Start();
         worker = new Thread(Loop) { IsBackground = true, Name = "agent-watch" };
         worker.Start();
     }
@@ -641,6 +642,32 @@ static class Elevated
 
     static string Sc { get { return Path.Combine(Environment.SystemDirectory, "sc.exe"); } }
     static string Netsh { get { return Path.Combine(Environment.SystemDirectory, "netsh.exe"); } }
+    static string Schtasks { get { return Path.Combine(Environment.SystemDirectory, "schtasks.exe"); } }
+    const string TaskName = "Yeondong";
+
+    // 로그인 즉시 사용자 권한으로 뜨게 하는 예약 작업을 등록한다(서비스가 시작할 때마다 경로를 맞춘다).
+    // HKCU Run은 Windows가 몇 분 미뤄 띄워서, 부팅 뒤 한동안 마우스가 넘어가지 않았다. 기본 우선순위 7은 낮아서 4로 둔다.
+    public static void RegisterLogonTask(string exe)
+    {
+        string tmp = null;
+        try
+        {
+            string xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
+                "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">" +
+                "<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>" +
+                "<Principals><Principal id=\"Users\"><GroupId>S-1-5-32-545</GroupId><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>" +
+                "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" +
+                "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" +
+                "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>4</Priority></Settings>" +
+                "<Actions Context=\"Users\"><Exec><Command>" + System.Security.SecurityElement.Escape(exe) + "</Command><Arguments>--autostart</Arguments></Exec></Actions>" +
+                "</Task>";
+            tmp = Path.GetTempFileName();
+            File.WriteAllText(tmp, xml, Encoding.Unicode);
+            Exec(Schtasks, "/Create /F /TN " + TaskName + " /XML \"" + tmp + "\"", 30000);
+        }
+        catch (Exception e) { Log.Write("예약 작업 등록 실패: " + e.Message); }
+        finally { try { if (tmp != null) File.Delete(tmp); } catch { } }
+    }
 
     static void StopService()
     {
@@ -714,6 +741,7 @@ static class Elevated
                 if (rc != 0 && rc != 1060) rc = 21; else rc = 0;
             }
             Exec(Netsh, "advfirewall firewall delete rule name=\"" + FwName + "\"", 30000);
+            Exec(Schtasks, "/Delete /F /TN " + TaskName, 15000);
             try { Directory.Delete(Dir(), true); }
             catch (Exception e)
             {

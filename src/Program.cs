@@ -5,6 +5,7 @@
 //   link.exe --uninstall     (관리자) 관리자 기능 제거
 //   link.exe --firewall <exe>  (관리자) 그 exe의 방화벽 허용만 넣는다
 //   link.exe --service / --agent   (내부용) 서비스와 SYSTEM 입력 도우미
+//   link.exe --autostart     (내부용) 로그인 때 뜬다. 이미 돌고 있거나 아직 설정 전이면 창을 띄우지 않고 끝난다
 //   link.exe --profile <이름>  (시험용) 설정·인증서·로그를 따로 두고 한 PC에서 둘을 띄운다
 using System;
 using System.Diagnostics;
@@ -17,7 +18,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("연동")]
 [assembly: System.Reflection.AssemblyProduct("Yeondong")]
-[assembly: System.Reflection.AssemblyVersion("0.7.3.0")]
+[assembly: System.Reflection.AssemblyVersion("0.7.4.0")]
 
 static class Program
 {
@@ -70,6 +71,7 @@ static class Program
         {
             if (!first)
             {
+                if (args.Contains("--autostart")) return 0;   // 예약 작업으로 이미 떴으면 Run 항목은 조용히 끝난다
                 if (!args.Contains("--replace")) { Signal(ShowEvent); return 0; }   // 이미 돌고 있으면 그쪽 설정 창을 띄운다
                 Signal(QuitEvent);
                 try { first = single.WaitOne(10000); } catch (AbandonedMutexException) { first = true; }
@@ -92,6 +94,7 @@ static class Program
         bool openSetup = false;
         if (cfg.Role == "" || !cfg.Consent)
         {
+            if (args.Contains("--autostart")) return 0;   // 이 PC를 쓰는 다른 계정에 로그인 때마다 설정 창을 띄우지 않는다
             Application.Run(new SetupForm(cfg, null));
             if (cfg.Role == "" || !cfg.Consent) return 0;
             openSetup = true;
@@ -158,13 +161,14 @@ static class Program
         }
     }
 
-    // 로그인할 때 이 exe가 뜨게 등록한다.
+    // 로그인할 때 이 exe가 뜨게 등록한다. Windows는 Run 항목을 몇 분 미뤄 띄우므로, 관리자 설치본은 서비스가
+    // 등록한 예약 작업(Elevated.RegisterLogonTask)이 먼저 띄우고 이 항목은 그것이 실패했을 때의 대비로 남는다.
     static void AutoStart()
     {
         if (Profile != "") return;
         try
         {
-            var cmd = "\"" + ExePath + "\"";
+            var cmd = "\"" + ExePath + "\" --autostart";
             using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
                 if ((k.GetValue("Yeondong") as string) != cmd) { k.SetValue("Yeondong", cmd); Log.Write("로그인 자동 시작 등록: " + cmd); }
         }

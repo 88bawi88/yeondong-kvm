@@ -4,5 +4,5 @@ $fw = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319"
     /out:"$PSScriptRoot\link.exe" `
     /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:"$fw\System.Web.Extensions.dll" `
     /r:System.ServiceProcess.dll /r:System.Core.dll /r:System.Security.dll /r:Microsoft.VisualBasic.dll `
-    "$PSScriptRoot\src\*.cs"
+    (Get-ChildItem "$PSScriptRoot\src\*.cs" | Where-Object { $_.Name -notmatch 'sync-conflict' } | ForEach-Object { $_.FullName })
 exit $LASTEXITCODE
