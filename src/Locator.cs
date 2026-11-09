@@ -1,6 +1,9 @@
-// 단축키로 PC를 오간 뒤 커서가 어디 있는지 잠깐 보여 준다. 커서 둘레에서 줄어드는 고리와 그 PC 이름을 1초쯤 띄운다.
-// 클릭은 아래 창으로 그대로 지나가고 포커스도 가져가지 않는다. 반투명 가장자리를 깨끗하게 그리려고 UpdateLayeredWindow를 쓴다.
+// 단축키로 PC를 오간 뒤 어디로 왔는지 잠깐 보여 준다(1.4초).
+// 커서가 있는 모니터 둘레에 색 테두리를 켜고, 그 모니터 위쪽 가운데에 "<PC 이름>로 넘어옴"을 띄우고, 커서에서 고리 두 개가 퍼져 나간다.
+// 모든 창은 클릭이 아래로 지나가고 포커스를 가져가지 않는다. 반투명 가장자리를 깨끗하게 그리려고 UpdateLayeredWindow를 쓴다.
+// 모니터 전체를 덮는 큰 창 하나 대신 테두리 네 줄·이름표·물결을 작은 창으로 따로 띄운다(큰 화면에서 매 프레임 그리는 부담을 피한다).
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -8,39 +11,159 @@ using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-class Locator : Form
+static class Locator
 {
-    static Locator one;
+    const int Ms = 1400;
+    static readonly Color Accent = Color.FromArgb(94, 106, 210);
+    static readonly Timer timer = new Timer { Interval = 15 };
+    static readonly List<LayerWin> edges = new List<LayerWin>();
+    static LayerWin pill, ripple;
+    static float s;
+    static int t0;
+    static bool hooked;
 
     // 화면 스레드에서 부른다.
-    public static void Flash(Point at, string name)
+    public static void Flash(Point p, string name)
     {
-        try
-        {
-            if (one == null || one.IsDisposed) one = new Locator();
-            one.Start(at, name);
-        }
+        try { Start(p, string.IsNullOrEmpty(name) ? "?" : name); }
         catch (Exception e) { Log.Write("위치 표시 실패: " + e.Message); }
     }
 
-    const int Ms = 1000;
-    static readonly Color Accent = Color.FromArgb(94, 106, 210);
-    readonly Timer timer = new Timer { Interval = 15 };
-    Point at;
-    string name;
-    int t0;
-    float s;          // 화면 크기에 맞춘 배율
-    Size size;
-    Point origin;     // 창 왼쪽 위(화면 좌표)
-    Point center;     // 창 안에서 커서 자리
-    Font font;
+    static void Start(Point p, string name)
+    {
+        if (!hooked) { timer.Tick += delegate { Frame(); }; hooked = true; }
+        var mon = Screen.FromPoint(p).Bounds;
+        s = Math.Max(1f, mon.Height / 1080f);
 
-    Locator()
+        // 테두리: 모니터 안쪽 가장자리 네 줄
+        int th = (int)Math.Round(6 * s);
+        var rects = new[]
+        {
+            new Rectangle(mon.Left, mon.Top, mon.Width, th),
+            new Rectangle(mon.Left, mon.Bottom - th, mon.Width, th),
+            new Rectangle(mon.Left, mon.Top + th, th, mon.Height - 2 * th),
+            new Rectangle(mon.Right - th, mon.Top + th, th, mon.Height - 2 * th),
+        };
+        while (edges.Count < 4) edges.Add(new LayerWin());
+        for (int i = 0; i < 4; i++)
+        {
+            var b = new Bitmap(rects[i].Width, rects[i].Height, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(b)) g.Clear(Accent);
+            edges[i].Set(b, rects[i].Location);
+        }
+
+        // 이름표: 모니터 위쪽 가운데
+        if (pill == null) pill = new LayerWin();
+        pill.Set(Pill(name + Josa(name) + " 넘어옴"), Point.Empty);
+        pill.Origin = new Point(mon.Left + (mon.Width - pill.Bmp.Width) / 2, mon.Top + th + (int)(18 * s));
+
+        // 물결: 커서 둘레
+        if (ripple == null) ripple = new LayerWin();
+        int box = (int)(150 * s);
+        ripple.Set(new Bitmap(box, box, PixelFormat.Format32bppArgb), new Point(p.X - box / 2, p.Y - box / 2));
+
+        t0 = Environment.TickCount;
+        Frame();
+        timer.Start();
+    }
+
+    static void Frame()
+    {
+        int ms = unchecked(Environment.TickCount - t0);
+        if (ms >= Ms)
+        {
+            timer.Stop();
+            foreach (var e in edges) e.Hide();
+            pill.Hide();
+            ripple.Hide();
+            return;
+        }
+        // 테두리·이름표: 0.2초에 걸쳐 켜지고, 1초까지 그대로 있다가, 끝까지 서서히 사라진다
+        float a = ms < 200 ? ms / 200f : ms < 1000 ? 1f : 1 - (ms - 1000) / 400f;
+        foreach (var e in edges) e.Blit((byte)(255 * a * 0.9f));
+        pill.Blit((byte)(255 * a));
+
+        // 물결: 고리 두 개가 0.25초 간격으로 퍼진다
+        var bmp = ripple.Bmp;
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float c = bmp.Width / 2f;
+            for (int i = 0; i < 2; i++)
+            {
+                float k = (ms - i * 250) / 1000f;
+                if (k <= 0 || k >= 1) continue;
+                float e = 1 - (1 - k) * (1 - k);              // 처음에 빠르고 끝에 느리다
+                float r = (6 + (c - 8 * s - 6) * e);
+                int al = (int)(255 * (1 - k));
+                using (var shade = new Pen(Color.FromArgb(al * 2 / 5, 0, 0, 0), 6 * s)) g.DrawEllipse(shade, c - r, c - r, 2 * r, 2 * r);
+                using (var pen = new Pen(Color.FromArgb(al, Accent), 3 * s)) g.DrawEllipse(pen, c - r, c - r, 2 * r, 2 * r);
+            }
+        }
+        ripple.Blit(255);
+    }
+
+    static Bitmap Pill(string text)
+    {
+        using (var font = new Font("Malgun Gothic", 17 * s, FontStyle.Bold, GraphicsUnit.Pixel))
+        {
+            SizeF ts;
+            using (var tmp = new Bitmap(1, 1)) using (var g0 = Graphics.FromImage(tmp)) ts = g0.MeasureString(text, font);
+            float padX = 18 * s, padY = 8 * s, m = 2 * s;
+            var b = new Bitmap((int)(ts.Width + 2 * padX + 2 * m), (int)(ts.Height + 2 * padY + 2 * m), PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(b))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                var box = new RectangleF(m, m, b.Width - 2 * m, b.Height - 2 * m);
+                using (var path = Rounded(box, box.Height / 2))
+                using (var fill = new SolidBrush(Color.FromArgb(240, 16, 17, 20)))
+                using (var edge = new Pen(Accent, 1.5f * s))
+                {
+                    g.FillPath(fill, path);
+                    g.DrawPath(edge, path);
+                }
+                using (var tb = new SolidBrush(Color.White))
+                    g.DrawString(text, font, tb, box.X + (box.Width - ts.Width) / 2, box.Y + (box.Height - ts.Height) / 2);
+            }
+            return b;
+        }
+    }
+
+    // 이름이 한글로 끝나면 받침을 보고 "로"/"으로"를 고른다(ㄹ 받침은 "로"). 영문·숫자는 "로"로 둔다.
+    static string Josa(string name)
+    {
+        char c = name[name.Length - 1];
+        if (c < 0xAC00 || c > 0xD7A3) return "로";
+        int jong = (c - 0xAC00) % 28;
+        return jong == 0 || jong == 8 ? "로" : "으로";
+    }
+
+    static GraphicsPath Rounded(RectangleF r, float rad)
+    {
+        var p = new GraphicsPath();
+        float d = Math.Min(rad * 2, Math.Min(r.Width, r.Height));
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+}
+
+// 그림 한 장을 화면 좌표 Origin에 투명도 alpha로 띄우는 창.
+class LayerWin : Form
+{
+    public Bitmap Bmp;
+    public Point Origin;
+
+    public LayerWin()
     {
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        timer.Tick += delegate { Frame(); };
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -55,88 +178,27 @@ class Locator : Form
         }
     }
 
-    void Start(Point p, string n)
+    public void Set(Bitmap b, Point origin)
     {
-        at = p;
-        name = string.IsNullOrEmpty(n) ? "?" : n;
-        s = Math.Max(1f, Screen.FromPoint(p).Bounds.Height / 1080f);
-        if (font != null) font.Dispose();
-        font = new Font("Malgun Gothic", 17 * s, FontStyle.Bold, GraphicsUnit.Pixel);
-        Size text = TextRenderer.MeasureText(name, font);
-        int r0 = (int)(72 * s), pad = (int)(8 * s);
-        int w = Math.Max(2 * r0, text.Width + (int)(28 * s)) + 2 * pad;
-        int h = 2 * r0 + 2 * pad;
-        size = new Size(w, h);
-        origin = new Point(p.X - w / 2, p.Y - h / 2);
-        center = new Point(w / 2, h / 2);
-        t0 = Environment.TickCount;
+        if (Bmp != null) Bmp.Dispose();
+        Bmp = b;
+        Origin = origin;
+    }
+
+    public void Blit(byte alpha)
+    {
         if (!Visible) Show();
-        SetWindowPos(Handle, new IntPtr(-1), origin.X, origin.Y, w, h, 0x0010 | 0x0040);   // 맨 위, NOACTIVATE | SHOWWINDOW
-        Frame();
-        timer.Start();
-    }
-
-    void Frame()
-    {
-        float t = unchecked(Environment.TickCount - t0) / (float)Ms;
-        if (t >= 1f) { timer.Stop(); Hide(); return; }
-        float k = Math.Min(1f, t / 0.45f);
-        k = 1 - (1 - k) * (1 - k) * (1 - k);                       // 처음에 빠르게, 끝에 천천히 줄어든다
-        float r = (72 - (72 - 24) * k) * s;
-        byte alpha = (byte)(t < 0.65f ? 255 : 255 * (1 - (t - 0.65f) / 0.35f));
-
-        using (var bmp = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb))
-        {
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                var ring = new RectangleF(center.X - r, center.Y - r, 2 * r, 2 * r);
-                using (var shade = new Pen(Color.FromArgb(110, 0, 0, 0), 8 * s)) g.DrawEllipse(shade, ring);
-                using (var pen = new Pen(Accent, 4 * s)) g.DrawEllipse(pen, ring);
-
-                // 이름표는 다 줄어든 고리 바로 아래에 둔다
-                var ts = g.MeasureString(name, font);
-                float bw = ts.Width + 20 * s, bh = ts.Height + 8 * s;
-                var box = new RectangleF(center.X - bw / 2, center.Y + 24 * s + 10 * s, bw, bh);
-                using (var path = Rounded(box, 6 * s))
-                using (var fill = new SolidBrush(Color.FromArgb(235, 16, 17, 20)))
-                using (var edge = new Pen(Color.FromArgb(200, Accent), 1.5f * s))
-                {
-                    g.FillPath(fill, path);
-                    g.DrawPath(edge, path);
-                }
-                using (var tb = new SolidBrush(Color.White))
-                    g.DrawString(name, font, tb, box.X + (bw - ts.Width) / 2, box.Y + (bh - ts.Height) / 2);
-            }
-            Blit(bmp, alpha);
-        }
-    }
-
-    static GraphicsPath Rounded(RectangleF r, float rad)
-    {
-        var p = new GraphicsPath();
-        float d = rad * 2;
-        p.AddArc(r.X, r.Y, d, d, 180, 90);
-        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        p.CloseFigure();
-        return p;
-    }
-
-    void Blit(Bitmap bmp, byte alpha)
-    {
         IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen), hb = IntPtr.Zero, old = IntPtr.Zero;
         try
         {
-            hb = bmp.GetHbitmap(Color.FromArgb(0));
+            hb = Bmp.GetHbitmap(Color.FromArgb(0));
             old = SelectObject(mem, hb);
-            var sz = new SIZE { cx = bmp.Width, cy = bmp.Height };
+            var sz = new SIZE { cx = Bmp.Width, cy = Bmp.Height };
             var src = new POINT();
-            var dst = new POINT { x = origin.X, y = origin.Y };
+            var dst = new POINT { x = Origin.X, y = Origin.Y };
             var bf = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = alpha, AlphaFormat = 1 };   // AC_SRC_ALPHA
             UpdateLayeredWindow(Handle, screen, ref dst, ref sz, mem, ref src, 0, ref bf, 2);                         // ULW_ALPHA
+            SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);                               // 맨 위로, NOSIZE | NOMOVE | NOACTIVATE
         }
         finally
         {

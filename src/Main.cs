@@ -5,7 +5,7 @@
 // 서브 PC가 자기 화면 가장자리에서 밀었다고 알려 오면, 그 변이 주 PC 모니터와 맞닿은 곳일 때만 돌아온다.
 // 비상 복귀: Ctrl+Alt+Home. 연결이 끊겨도 곧바로 돌아온다.
 // 단축키 전환: Alt+`(RegisterHotKey). 마지막에 쓴 서브 PC의 커서 자리로 넘어가고, 다시 누르면 떠난 자리로 돌아온다.
-// 단축키로 오가면 도착한 PC 화면에 커서 위치와 PC 이름을 잠깐 띄운다(Locator.cs).
+// 단축키로 오가면 도착한 PC 화면에 모니터 테두리·PC 이름·커서 물결을 잠깐 띄운다(Locator.cs).
 using System;
 using System.Collections.Generic;
 using System.Drawing;
