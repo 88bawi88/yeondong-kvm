@@ -96,9 +96,10 @@ static class Locator
                 if (k <= 0 || k >= 1) continue;
                 float e = 1 - (1 - k) * (1 - k);              // 처음에 빠르고 끝에 느리다
                 float r = (6 + (c - 8 * s - 6) * e);
-                int al = (int)(255 * (1 - k));
-                using (var shade = new Pen(Color.FromArgb(al * 2 / 5, 0, 0, 0), 6 * s)) g.DrawEllipse(shade, c - r, c - r, 2 * r, 2 * r);
-                using (var pen = new Pen(Color.FromArgb(al, Accent), 3 * s)) g.DrawEllipse(pen, c - r, c - r, 2 * r, 2 * r);
+                // 2026-11-10 바위님 지시: 고리 8px, 퍼지는 동안 흐려지는 정도는 절반
+                int al = (int)(255 * (1 - k * 0.5f));
+                using (var shade = new Pen(Color.FromArgb(al * 3 / 5, 0, 0, 0), 11 * s)) g.DrawEllipse(shade, c - r, c - r, 2 * r, 2 * r);
+                using (var pen = new Pen(Color.FromArgb(al, Accent), 8 * s)) g.DrawEllipse(pen, c - r, c - r, 2 * r, 2 * r);
             }
         }
         ripple.Blit(255);
