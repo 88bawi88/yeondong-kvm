@@ -330,7 +330,7 @@ class MainSide : Form
     // Alt+`를 주 PC에서 눌렀다. 서브 PC에 있을 때는 KeyHook이 받는다(훅이 키를 먼저 막으므로 여기로 오지 않는다).
     void HotKey()
     {
-        if (remote != null) { GoLocal(back); Locator.Flash(Cursor.Position, cfg.Name); return; }
+        if (remote != null) { GoLocal(MonCenter(back)); Locator.Flash(Cursor.Position, cfg.Name); return; }
         var s = last != null && last.Connected ? last : subs.FirstOrDefault(x => x.Connected);
         if (s == null) { Balloon("연결된 서브 PC가 없습니다."); return; }
         if (CursorClipped()) return;   // 게임이 커서를 가둬 둔 중
@@ -409,6 +409,13 @@ class MainSide : Form
         Log.Write(s.M.Name + "(으)로 넘어감, " + how);
         Tell("넘어옴, " + how + " (주 PC " + from.X + "," + from.Y + ")");
         UpdateTray();
+    }
+
+    // 단축키로 돌아올 때는 커서를 떠났던 모니터의 가운데에 둔다(2026-11-10 바위님 지시)
+    static Point MonCenter(Point p)
+    {
+        var b = Screen.FromPoint(p).Bounds;
+        return new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
     }
 
     void GoLocal(Point to)
@@ -520,7 +527,7 @@ class MainSide : Form
                 lk.Send(Msg.Key, new byte[] { 0xE8, 0, 0, 0, 0 });
                 lk.Send(Msg.Key, new byte[] { 0xE8, 0, 0, 0, 1 });
             }
-            BeginInvoke((Action)(() => { GoLocal(back); Locator.Flash(Cursor.Position, cfg.Name); }));
+            BeginInvoke((Action)(() => { GoLocal(MonCenter(back)); Locator.Flash(Cursor.Position, cfg.Name); }));
             return (IntPtr)1;
         }
         var b = new byte[5];

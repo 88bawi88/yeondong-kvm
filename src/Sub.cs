@@ -331,11 +331,9 @@ static class Sub
         {
             p = pos;
             try { var c = Cursor.Position; if (OnAnyScreen(c.X, c.Y)) p = c; } catch { }
-            if (!OnAnyScreen(p.X, p.Y))
-            {
-                var b = Screen.PrimaryScreen.Bounds;
-                p = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
-            }
+            // 단축키로 오면 커서를 그 모니터 가운데에 둔다(2026-11-10 바위님 지시). 화면 밖이면 주 모니터 가운데.
+            var b = OnAnyScreen(p.X, p.Y) ? Screen.FromPoint(p).Bounds : Screen.PrimaryScreen.Bounds;
+            p = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
             pos = p;
             active = true;
             MoveAbs(pos);
