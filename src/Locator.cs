@@ -36,7 +36,7 @@ static class Locator
         s = Math.Max(1f, mon.Height / 1080f);
 
         // 테두리: 모니터 안쪽 가장자리 네 줄
-        int th = (int)Math.Round(6 * s);
+        int th = (int)Math.Round(18 * s);   // 2026-11-10 바위님 지시: 18px, 100%
         var rects = new[]
         {
             new Rectangle(mon.Left, mon.Top, mon.Width, th),
@@ -80,7 +80,7 @@ static class Locator
         }
         // 테두리·이름표: 0.2초에 걸쳐 켜지고, 1초까지 그대로 있다가, 끝까지 서서히 사라진다
         float a = ms < 200 ? ms / 200f : ms < 1000 ? 1f : 1 - (ms - 1000) / 400f;
-        foreach (var e in edges) e.Blit((byte)(255 * a * 0.9f));
+        foreach (var e in edges) e.Blit((byte)(255 * a));
         pill.Blit((byte)(255 * a));
 
         // 물결: 고리 두 개가 0.25초 간격으로 퍼진다
