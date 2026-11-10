@@ -14,7 +14,7 @@ using System.Windows.Forms;
 static class Locator
 {
     const int Ms = 1400;
-    static readonly Color Accent = Color.FromArgb(94, 106, 210);
+    static readonly Color Accent = Color.FromArgb(235, 60, 60);   // 빨강(2026-11-10 바위님 지시: 눈에 잘 띄게)
     static readonly Timer timer = new Timer { Interval = 15 };
     static readonly List<LayerWin> edges = new List<LayerWin>();
     static LayerWin pill, ripple;
