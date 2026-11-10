@@ -72,6 +72,7 @@ static class Sub
             if (m.Role != "main") { l.Close("메인 PC가 아님"); return; }
             l.OnMessage = OnMessage;
             Share.Attach(l, m.Host);
+            if (MicPlay.Device() >= 0) l.Send(Msg.MicReady, null);
             var old = cur;
             cur = l;
             if (old != null && old != l) lock (gate) { active = false; ReleaseAll(); }
@@ -82,6 +83,7 @@ static class Sub
             FileXfer.Closed(l);
             ScreenShare.Stop(l);
             Share.Detach(l);
+            if (cur == l) MicPlay.Stop();
             if (cur != l) return;
             lock (gate) { cur = null; active = false; ReleaseAll(); }
             PostOverlay();
@@ -282,6 +284,8 @@ static class Sub
                 case Msg.ViewPoint: DoViewPoint(BitConverter.ToSingle(b, 0), BitConverter.ToSingle(b, 4)); break;
                 case Msg.Enter: DoEnter(b[0], Link.Frac(b)); break;
                 case Msg.Jump: DoJump(); break;
+                case Msg.MicData: MicPlay.Data(b); break;
+                case Msg.MicStop: MicPlay.Stop(); break;
                 case Msg.Leave: lock (gate) { active = false; ReleaseAll(); } PostOverlay(); break;
                 case Msg.Button: DoButton(b[0], b[1] != 0); break;
                 case Msg.Wheel: DoWheel(b[0] != 0, BitConverter.ToInt32(b, 1)); break;

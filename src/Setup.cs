@@ -37,6 +37,12 @@ static class Tray
         var fileItem = new ToolStripMenuItem("파일 끌어 놓기") { Checked = c.Files };
         fileItem.Click += delegate { c.Files = !c.Files; try { c.Save(); } catch { } Log.Write("파일 끌어 놓기 " + (c.Files ? "켬" : "끔")); };
         m.Items.Add(fileItem);
+        if (c.Role == "main")
+        {
+            var micItem = new ToolStripMenuItem("마이크 넘기기 (커서가 서브 PC에 있을 때)") { Checked = c.Mic };
+            micItem.Click += delegate { c.Mic = !c.Mic; try { c.Save(); } catch { } if (!c.Mic) MicSend.Stop(); Log.Write("마이크 넘기기 " + (c.Mic ? "켬" : "끔")); };
+            m.Items.Add(micItem);
+        }
         if (c.Role == "sub")
         {
             var viewItem = new ToolStripMenuItem("메인 PC가 이 화면 보기 허용") { Checked = c.ScreenShare };

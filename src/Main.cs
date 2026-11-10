@@ -197,6 +197,7 @@ class MainSide : Form
     void OnMessage(Link k, byte type, byte[] body)
     {
         if (FileXfer.Handle(k, type, body) || Share.Handle(k, type, body)) return;
+        if (type == Msg.MicReady) { k.MicOk = true; Log.Write(k.Name + ": 마이크 받기 가능"); return; }
         var s = subs.FirstOrDefault(x => x.Link == k);
         if (s == null) return;
         if (type == Msg.FileReq) { FileXfer.Serve(k, body, MyEntry); return; }
@@ -400,6 +401,7 @@ class MainSide : Form
         W.SetCursorPos(park.X, park.Y);
         hider.Location = new Point(park.X - 32, park.Y - 32);
         hider.Show();
+        if (cfg.Mic && s.Link.MicOk) MicSend.Start(s.Link);
         if (jump) s.Link.Send(Msg.Jump, null);
         else s.Link.SendSideFrac(Msg.Enter, side, frac);
         // 왼쪽 단추를 누른 채 넘어갔으면 파일을 끌고 있을 수 있다. 끌기 중인 탐색기가 숨김 창을 알아채게 커서를 1픽셀 흔든다.
@@ -427,6 +429,7 @@ class MainSide : Form
         probing = false;
         hooks.Remove();
         hider.Hide();
+        MicSend.Stop();
         if (s.Connected) s.Link.Send(Msg.Leave, null);
         // 모니터 밖 좌표면 가장 가까운 모니터 안으로 넣는다
         var mb = Screen.FromPoint(to).Bounds;

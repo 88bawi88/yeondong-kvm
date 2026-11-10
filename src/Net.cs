@@ -34,6 +34,9 @@ static class Msg
     public const byte ViewPoint = 64; // 메인→서브: [x float][y float] 서브 가상 화면 안 비율 위치로 커서를 옮기고 입력을 받는다. 음수면 옮기지 않는다
     public const byte SyncList = 70;  // 양쪽: json {files, dirs} 공유 폴더에 있는 것 (Share.cs)
     public const byte SyncOp = 71;    // 양쪽: json {op, rel, ..} 공유 폴더에서 바뀐 것
+    public const byte MicReady = 80;  // 서브→메인: 이 PC에 VB-CABLE이 있어 마이크 소리를 받을 수 있다 (Mic.cs)
+    public const byte MicData = 81;   // 메인→서브: 24kHz 16비트 모노 PCM 조각(커서가 서브에 있는 동안)
+    public const byte MicStop = 82;   // 메인→서브: 마이크 보내기 끝
 
     // 변 번호. 서브 화면 기준이다.
     public const byte Left = 0, Top = 1, Right = 2, Bottom = 3;
@@ -48,6 +51,7 @@ class Link
     readonly BlockingCollection<byte[]> slow = new BlockingCollection<byte[]>(64);   // 파일 조각. 가득 차면 보내는 쪽이 기다린다
     public volatile bool Closed;
     public string PeerId = "", Name = "";
+    public volatile bool MicOk;                     // 상대가 MicReady를 보냈다(메인 PC 쪽에서 쓴다)
     public bool Dialed;                             // 이쪽에서 건 연결인가(같은 상대와 두 연결이 생기면 하나만 남길 때 쓴다)
     public Action<Link, byte, byte[]> OnMessage;   // 읽기 스레드에서 불린다
     public Action<Link> OnClosed;                   // 한 번만 불린다
