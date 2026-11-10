@@ -59,7 +59,7 @@ static class Locator
 
         // 물결: 커서 둘레
         if (ripple == null) ripple = new LayerWin();
-        int box = (int)(150 * s);
+        int box = (int)(300 * s);   // 2026-11-10 바위님 지시: 퍼지는 너비 2배
         ripple.Set(new Bitmap(box, box, PixelFormat.Format32bppArgb), new Point(p.X - box / 2, p.Y - box / 2));
 
         t0 = Environment.TickCount;
@@ -95,11 +95,11 @@ static class Locator
                 float k = (ms - i * 250) / 1000f;
                 if (k <= 0 || k >= 1) continue;
                 float e = 1 - (1 - k) * (1 - k);              // 처음에 빠르고 끝에 느리다
-                float r = (6 + (c - 8 * s - 6) * e);
-                // 2026-11-10 바위님 지시: 고리 8px, 퍼지는 동안 흐려지는 정도는 절반
+                float r = (6 + (c - 10 * s - 6) * e);
+                // 2026-11-10 바위님 지시: 고리 12px, 퍼지는 동안 흐려지는 정도는 절반
                 int al = (int)(255 * (1 - k * 0.5f));
-                using (var shade = new Pen(Color.FromArgb(al * 3 / 5, 0, 0, 0), 11 * s)) g.DrawEllipse(shade, c - r, c - r, 2 * r, 2 * r);
-                using (var pen = new Pen(Color.FromArgb(al, Accent), 8 * s)) g.DrawEllipse(pen, c - r, c - r, 2 * r, 2 * r);
+                using (var shade = new Pen(Color.FromArgb(al * 3 / 5, 0, 0, 0), 16 * s)) g.DrawEllipse(shade, c - r, c - r, 2 * r, 2 * r);
+                using (var pen = new Pen(Color.FromArgb(al, Accent), 12 * s)) g.DrawEllipse(pen, c - r, c - r, 2 * r, 2 * r);
             }
         }
         ripple.Blit(255);
